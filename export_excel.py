@@ -9,6 +9,14 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side, numbers
 from openpyxl.utils import get_column_letter
 
 JST = timezone(timedelta(hours=9))
+
+# Locale-independent weekday names (strftime %A is locale-dependent → KeyError on Korean/Japanese systems)
+_WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _weekday_en(dt):
+    """Return English weekday name regardless of system locale."""
+    return _WEEKDAY_NAMES[dt.weekday()]
 THIN_BORDER = Border(
     left=Side(style="thin"), right=Side(style="thin"),
     top=Side(style="thin"), bottom=Side(style="thin"),
@@ -169,7 +177,7 @@ def sheet_time_analysis(wb, posts):
         hour_data[h]["likes"] += likes
         hour_data[h]["engagement"] += engagement
 
-        wd = dt.strftime("%A")
+        wd = _weekday_en(dt)
         if wd not in weekday_data:
             weekday_data[wd] = {"count": 0, "views": 0, "likes": 0, "engagement": 0}
         weekday_data[wd]["count"] += 1
@@ -296,10 +304,10 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
         ["총 좋아요", f"{total_likes:,}"],
         ["총 답글", f"{total_replies:,}"],
         ["총 리포스트", f"{total_reposts:,}"],
-        ["평균 조회수/게시물", f"{total_views // len(active):,}"],
-        ["평균 좋아요/게시물", f"{total_likes / len(active):.1f}"],
+        ["평균 조회수/게시물", f"{total_views // max(len(active), 1):,}"],
+        ["평균 좋아요/게시물", f"{total_likes / max(len(active), 1):.1f}"],
         ["전체 인게이지먼트율", f"{(total_likes + total_replies + total_reposts) / max(total_views, 1) * 100:.2f}%"],
-        ["바이럴 게시물 (1만+조회)", f"{len(viral_posts)}개 ({len(viral_posts)/len(active)*100:.1f}%)"],
+        ["바이럴 게시물 (1만+조회)", f"{len(viral_posts)}개 ({len(viral_posts)/max(len(active), 1)*100:.1f}%)"],
         ["30일 조회수", f"{user_insights.get('30d_views', 0):,}"],
     ]
     for label, val in kpi:
@@ -342,7 +350,7 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
         ws.cell(row=row, column=2, value=(p.get("text") or "").replace("\n", " ")[:60])
         ws.cell(row=row, column=3, value=views)
         ws.cell(row=row, column=4, value=likes)
-        ws.cell(row=row, column=5, value=round(likes / views * 100, 2))
+        ws.cell(row=row, column=5, value=round(likes / max(views, 1) * 100, 2))
         ws.cell(row=row, column=6, value=dt.strftime("%Y-%m-%d") if dt else "")
         row += 1
     row += 2
@@ -357,7 +365,7 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
             dt = parse_ts(p.get("timestamp"))
             if dt:
                 viral_hours[dt.hour] += 1
-                viral_weekdays[dt.strftime("%A")] += 1
+                viral_weekdays[_weekday_en(dt)] += 1
         top_hours = viral_hours.most_common(3)
         top_days = viral_weekdays.most_common(3)
         day_kr = {"Monday": "월", "Tuesday": "화", "Wednesday": "수", "Thursday": "목", "Friday": "금", "Saturday": "토", "Sunday": "일"}
@@ -539,10 +547,10 @@ def sheet_viral_analysis(wb, posts):
     weekday_stats = {day: {"viral": 0, "normal": 0} for day in day_order}
     for _, m in viral:
         if m["dt"]:
-            weekday_stats[m["dt"].strftime("%A")]["viral"] += 1
+            weekday_stats[_weekday_en(m["dt"])]["viral"] += 1
     for _, m in normal:
         if m["dt"]:
-            weekday_stats[m["dt"].strftime("%A")]["normal"] += 1
+            weekday_stats[_weekday_en(m["dt"])]["normal"] += 1
     for day in day_order:
         v = weekday_stats[day]["viral"]
         n = weekday_stats[day]["normal"]
@@ -1070,10 +1078,10 @@ def main():
     output_path = os.path.join(output_dir, f"threads_analysis_{timestamp}.xlsx")
 
     data = load_data(input_path)
-    posts = data["posts"]
+    posts = data.get("posts", [])
     user_insights = data.get("user_insights", {})
     demographics = data.get("follower_demographics", {})
-    followers = user_insights.get("followers_count", 1493)
+    followers = user_insights.get("followers_count", 0)
 
     username = data.get("profile", {}).get("username", "unknown")
 

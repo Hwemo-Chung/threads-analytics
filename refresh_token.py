@@ -25,6 +25,7 @@ def refresh_token():
             "grant_type": "th_refresh_token",
             "access_token": ACCESS_TOKEN,
         },
+        timeout=30,
     )
 
     if resp.status_code != 200:

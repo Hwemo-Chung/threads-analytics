@@ -59,6 +59,7 @@ def exchange_code_for_short_token(code: str) -> dict:
             "redirect_uri": REDIRECT_URI,
             "code": code,
         },
+        timeout=30,
     )
     resp.raise_for_status()
     return resp.json()
@@ -73,6 +74,7 @@ def exchange_for_long_token(short_token: str) -> dict:
             "client_secret": APP_SECRET,
             "access_token": short_token,
         },
+        timeout=30,
     )
     resp.raise_for_status()
     return resp.json()
