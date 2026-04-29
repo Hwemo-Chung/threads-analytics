@@ -285,7 +285,6 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
         reverse=True)
 
     row = 1
-    username = data.get("profile", {}).get("username", "unknown") if isinstance(data, dict) else "unknown"
     ws.cell(row=row, column=1, value=f"@{username} 성장 인사이트 리포트").font = Font(bold=True, size=14)
     ws.cell(row=row + 1, column=1, value=f"분석일: {datetime.now(JST).strftime('%Y-%m-%d')} / 팔로워: {followers:,}명 / 게시물: {len(active)}개 (리포스트 제외)")
     row += 3
