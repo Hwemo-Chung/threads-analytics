@@ -1,0 +1,25 @@
+# 환경변수 (API 키, 토큰)
+.env
+
+# 분석 결과 데이터 (개인 계정 데이터 포함)
+output/
+
+# SSL 인증서
+localhost.crt
+localhost.key
+
+# IDE
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# OS
+.DS_Store
+Thumbs.db
