@@ -67,10 +67,10 @@ def sheet_all_posts(wb, posts):
     ws.append(headers)
     style_header(ws, 1, len(headers))
 
-    sorted_posts = sorted(posts, key=lambda p: p.get("timestamp", ""), reverse=True)
+    sorted_posts = sorted(posts, key=lambda p: p.get("timestamp") or "", reverse=True)
 
     for i, p in enumerate(sorted_posts, 1):
-        ins = p.get("insights", {})
+        ins = (p.get("insights") or {})
         views = ins.get("views", 0)
         likes = ins.get("likes", 0)
         replies = ins.get("replies", 0)
@@ -108,7 +108,7 @@ def sheet_ranking(wb, posts, followers):
         style_header(ws, start_row + 1, len(headers))
 
         for i, p in enumerate(sorted_list[:30], 1):
-            ins = p.get("insights", {})
+            ins = (p.get("insights") or {})
             views = ins.get("views", 0)
             likes = ins.get("likes", 0)
             replies = ins.get("replies", 0)
@@ -130,23 +130,23 @@ def sheet_ranking(wb, posts, followers):
 
     active_posts = [p for p in posts if p.get("media_type") != "REPOST_FACADE"]
 
-    by_views = sorted(active_posts, key=lambda p: p.get("insights", {}).get("views", 0), reverse=True)
+    by_views = sorted(active_posts, key=lambda p: (p.get("insights") or {}).get("views", 0), reverse=True)
     row = add_section("📊 조회수 TOP 30", by_views, 1)
 
     by_engagement = sorted(active_posts, key=lambda p: sum([
-        p.get("insights", {}).get("likes", 0),
-        p.get("insights", {}).get("replies", 0),
-        p.get("insights", {}).get("reposts", 0),
-        p.get("insights", {}).get("quotes", 0),
+        (p.get("insights") or {}).get("likes", 0),
+        (p.get("insights") or {}).get("replies", 0),
+        (p.get("insights") or {}).get("reposts", 0),
+        (p.get("insights") or {}).get("quotes", 0),
     ]), reverse=True)
     row = add_section("❤️ 인게이지먼트 TOP 30", by_engagement, row)
 
     min_views = 500
-    qualified = [p for p in active_posts if p.get("insights", {}).get("views", 0) >= min_views]
-    by_like_rate = sorted(qualified, key=lambda p: p.get("insights", {}).get("likes", 0) / max(p.get("insights", {}).get("views", 1), 1), reverse=True)
+    qualified = [p for p in active_posts if (p.get("insights") or {}).get("views", 0) >= min_views]
+    by_like_rate = sorted(qualified, key=lambda p: (p.get("insights") or {}).get("likes", 0) / max((p.get("insights") or {}).get("views", 1), 1), reverse=True)
     row = add_section(f"🎯 좋아요율 TOP 30 (조회 {min_views}+ 기준)", by_like_rate, row)
 
-    by_viral = sorted(active_posts, key=lambda p: p.get("insights", {}).get("reposts", 0) + p.get("insights", {}).get("quotes", 0), reverse=True)
+    by_viral = sorted(active_posts, key=lambda p: (p.get("insights") or {}).get("reposts", 0) + (p.get("insights") or {}).get("quotes", 0), reverse=True)
     add_section("🔄 바이럴(리포스트+인용) TOP 30", by_viral, row)
 
     auto_width(ws)
@@ -164,7 +164,7 @@ def sheet_time_analysis(wb, posts):
         dt = parse_ts(p.get("timestamp"))
         if not dt:
             continue
-        ins = p.get("insights", {})
+        ins = (p.get("insights") or {})
         views = ins.get("views", 0)
         likes = ins.get("likes", 0)
         engagement = likes + ins.get("replies", 0) + ins.get("reposts", 0)
@@ -244,7 +244,7 @@ def sheet_demographics(wb, demographics, followers):
 
     for key in ["country", "city", "gender", "age"]:
         data = demographics.get(key, {})
-        if not data:
+        if not data or not isinstance(data, dict):
             continue
         ws.cell(row=row, column=1, value=label_map.get(key, key)).font = Font(bold=True, size=12)
         row += 1
@@ -270,15 +270,15 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
     ws = wb.create_sheet("성장 인사이트")
     active = [p for p in posts if p.get("media_type") != "REPOST_FACADE"]
 
-    total_views = sum(p.get("insights", {}).get("views", 0) for p in active)
-    total_likes = sum(p.get("insights", {}).get("likes", 0) for p in active)
-    total_replies = sum(p.get("insights", {}).get("replies", 0) for p in active)
-    total_reposts = sum(p.get("insights", {}).get("reposts", 0) for p in active)
+    total_views = sum((p.get("insights") or {}).get("views", 0) for p in active)
+    total_likes = sum((p.get("insights") or {}).get("likes", 0) for p in active)
+    total_replies = sum((p.get("insights") or {}).get("replies", 0) for p in active)
+    total_reposts = sum((p.get("insights") or {}).get("reposts", 0) for p in active)
 
     type_stats = {}
     for p in active:
         mt = p.get("media_type", "UNKNOWN")
-        ins = p.get("insights", {})
+        ins = (p.get("insights") or {})
         if mt not in type_stats:
             type_stats[mt] = {"count": 0, "views": 0, "likes": 0, "engagement": 0}
         type_stats[mt]["count"] += 1
@@ -286,10 +286,10 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
         eng = ins.get("likes", 0) + ins.get("replies", 0) + ins.get("reposts", 0) + ins.get("quotes", 0)
         type_stats[mt]["engagement"] += eng
 
-    viral_posts = [p for p in active if p.get("insights", {}).get("views", 0) >= 10000]
-    high_engage = [p for p in active if p.get("insights", {}).get("views", 0) >= 500]
+    viral_posts = [p for p in active if (p.get("insights") or {}).get("views", 0) >= 10000]
+    high_engage = [p for p in active if (p.get("insights") or {}).get("views", 0) >= 500]
     high_engage_sorted = sorted(high_engage,
-        key=lambda p: (p.get("insights", {}).get("likes", 0) + p.get("insights", {}).get("replies", 0)) / max(p.get("insights", {}).get("views", 1), 1),
+        key=lambda p: ((p.get("insights") or {}).get("likes", 0) + (p.get("insights") or {}).get("replies", 0)) / max((p.get("insights") or {}).get("views", 1), 1),
         reverse=True)
 
     row = 1
@@ -342,7 +342,7 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
     style_header(ws, row, len(headers))
     row += 1
     for i, p in enumerate(high_engage_sorted[:20], 1):
-        ins = p.get("insights", {})
+        ins = (p.get("insights") or {})
         views = ins.get("views", 1)
         likes = ins.get("likes", 0)
         dt = parse_ts(p.get("timestamp"))
@@ -407,7 +407,7 @@ def _active_posts(posts):
 
 
 def _post_metrics(post):
-    ins = post.get("insights", {})
+    ins = post.get("insights") or {}
     views = ins.get("views", 0)
     likes = ins.get("likes", 0)
     replies = ins.get("replies", 0)
@@ -584,7 +584,7 @@ def sheet_viral_analysis(wb, posts):
 def sheet_like_rate_analysis(wb, posts):
     ws = wb.create_sheet("좋아요율 심층분석")
     active_posts = _active_posts(posts)
-    qualified = [(p, _post_metrics(p)) for p in active_posts if p.get("insights", {}).get("views", 0) >= 500]
+    qualified = [(p, _post_metrics(p)) for p in active_posts if (p.get("insights") or {}).get("views", 0) >= 500]
     row = 1
 
     row = _set_section_title(ws, row, "1. 좋아요율 분포", end_col=5)
