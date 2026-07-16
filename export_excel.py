@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from collections import Counter
 
 import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side, numbers
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 JST = timezone(timedelta(hours=9))
@@ -167,7 +167,7 @@ def sheet_time_analysis(wb, posts):
         ins = (p.get("insights") or {})
         views = ins.get("views", 0)
         likes = ins.get("likes", 0)
-        engagement = likes + ins.get("replies", 0) + ins.get("reposts", 0)
+        engagement = likes + ins.get("replies", 0) + ins.get("reposts", 0) + ins.get("quotes", 0)
 
         h = dt.hour
         if h not in hour_data:
@@ -266,14 +266,100 @@ def sheet_demographics(wb, demographics, followers):
     auto_width(ws)
 
 
-def sheet_insights_report(wb, posts, user_insights, followers, username=""):
+def _build_growth_strategies(active, type_stats, viral_posts, demographics, total_views, total_likes, total_replies, total_reposts, total_quotes):
+    """Data-driven strategy bullets — no account-specific hardcoding."""
+    strategies = []
+    day_kr = {"Monday": "월", "Tuesday": "화", "Wednesday": "수", "Thursday": "목", "Friday": "금", "Saturday": "토", "Sunday": "일"}
+
+    carousel = type_stats.get("CAROUSEL_ALBUM")
+    text = type_stats.get("TEXT_POST")
+    if carousel and text and carousel["count"] and text["count"]:
+        c_avg = carousel["engagement"] / carousel["count"]
+        t_avg = text["engagement"] / text["count"]
+        if t_avg > 0 and c_avg > t_avg:
+            strategies.append(
+                f"캐러셀 활용 확대 — 평균 인게이지먼트 캐러셀 {c_avg:.1f} vs 텍스트 {t_avg:.1f} "
+                f"({c_avg / t_avg:.1f}배). 현재 {carousel['count']}개 → 주 1-2회 목표"
+            )
+        elif c_avg > 0:
+            strategies.append(
+                f"미디어 타입 실험 — 캐러셀 {c_avg:.1f} / 텍스트 {t_avg:.1f} 평균 인게이지먼트. 상위 타입 비중 확대"
+            )
+
+    hour_views = Counter()
+    hour_count = Counter()
+    for p in active:
+        dt = parse_ts(p.get("timestamp"))
+        if not dt:
+            continue
+        hour_views[dt.hour] += (p.get("insights") or {}).get("views", 0)
+        hour_count[dt.hour] += 1
+    if hour_count:
+        avg_by_hour = {h: hour_views[h] / hour_count[h] for h in hour_count}
+        top_hours = sorted(avg_by_hour.items(), key=lambda x: x[1], reverse=True)[:3]
+        hour_str = ", ".join(f"{h:02d}시" for h, _ in top_hours)
+        strategies.append(f"골든타임 집중 — 평균 조회 상위 시간대(JST): {hour_str}. 핵심 콘텐츠를 이 시간대에 게시")
+
+    if viral_posts:
+        viral_types = Counter(p.get("media_type") for p in viral_posts)
+        top_type, top_n = viral_types.most_common(1)[0]
+        strategies.append(
+            f"바이럴 패턴 반복 — 1만+ 조회 {len(viral_posts)}개 중 최빈 타입 {top_type}({top_n}건). "
+            "해당 포맷·주제 패턴 재사용"
+        )
+
+    strategies.append(
+        "좋아요율 높은 주제 강화 — 좋아요율 TOP 게시물 패턴을 분석해 반복 (좋아요율 = 팬 충성도 지표)"
+    )
+
+    demo_parts = []
+    for key, label in [("age", "연령"), ("gender", "성별"), ("country", "국가")]:
+        data = demographics.get(key) or {}
+        if isinstance(data, dict) and data:
+            top_k, _ = max(data.items(), key=lambda x: x[1])
+            demo_parts.append(f"{label} {top_k}")
+    if demo_parts:
+        strategies.append(
+            f"팔로워 인구통계 활용 — 핵심층: {', '.join(demo_parts)}. 이 타겟에 맞는 콘텐츠 톤 유지"
+        )
+
+    eng_rate = (total_likes + total_replies + total_reposts + total_quotes) / max(total_views, 1) * 100
+    strategies.append(
+        f"답글 유도 — 현재 인게이지먼트율 {eng_rate:.2f}%. 질문형 마무리로 답글 비중을 높이면 알고리즘 가중치에 유리"
+    )
+
+    weekday_count = Counter()
+    for p in active:
+        dt = parse_ts(p.get("timestamp"))
+        if dt:
+            weekday_count[_weekday_en(dt)] += 1
+    if weekday_count:
+        weekend = weekday_count.get("Saturday", 0) + weekday_count.get("Sunday", 0)
+        weekday = sum(weekday_count.get(d, 0) for d in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])
+        if weekday > 0 and weekend < weekday * 0.35:
+            strategies.append(
+                "주말 활동 강화 — 토·일 게시량이 평일 대비 적음. 경쟁 콘텐츠가 줄어 도달 기회일 수 있음"
+            )
+        elif weekend > 0:
+            top_day = max(weekday_count.items(), key=lambda x: x[1])[0]
+            strategies.append(
+                f"게시 요일 분산 — 현재 최빈 요일 {day_kr.get(top_day, top_day)}. "
+                "성과 상위 요일에 핵심 콘텐츠 배치"
+            )
+
+    return strategies
+
+
+def sheet_insights_report(wb, posts, user_insights, followers, username="", demographics=None):
     ws = wb.create_sheet("성장 인사이트")
     active = [p for p in posts if p.get("media_type") != "REPOST_FACADE"]
+    demographics = demographics or {}
 
     total_views = sum((p.get("insights") or {}).get("views", 0) for p in active)
     total_likes = sum((p.get("insights") or {}).get("likes", 0) for p in active)
     total_replies = sum((p.get("insights") or {}).get("replies", 0) for p in active)
     total_reposts = sum((p.get("insights") or {}).get("reposts", 0) for p in active)
+    total_quotes = sum((p.get("insights") or {}).get("quotes", 0) for p in active)
 
     type_stats = {}
     for p in active:
@@ -299,6 +385,7 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
 
     ws.cell(row=row, column=1, value="1. 핵심 지표").font = Font(bold=True, size=12)
     row += 1
+    eng_rate = (total_likes + total_replies + total_reposts + total_quotes) / max(total_views, 1) * 100
     kpi = [
         ["총 조회수", f"{total_views:,}"],
         ["총 좋아요", f"{total_likes:,}"],
@@ -306,7 +393,7 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
         ["총 리포스트", f"{total_reposts:,}"],
         ["평균 조회수/게시물", f"{total_views // max(len(active), 1):,}"],
         ["평균 좋아요/게시물", f"{total_likes / max(len(active), 1):.1f}"],
-        ["전체 인게이지먼트율", f"{(total_likes + total_replies + total_reposts) / max(total_views, 1) * 100:.2f}%"],
+        ["전체 인게이지먼트율", f"{eng_rate:.2f}%"],
         ["바이럴 게시물 (1만+조회)", f"{len(viral_posts)}개 ({len(viral_posts)/max(len(active), 1)*100:.1f}%)"],
         ["30일 조회수", f"{user_insights.get('30d_views', 0):,}"],
     ]
@@ -384,15 +471,10 @@ def sheet_insights_report(wb, posts, user_insights, followers, username=""):
 
     ws.cell(row=row, column=1, value="5. 성장 전략 제안").font = Font(bold=True, size=12)
     row += 1
-    strategies = [
-        "캐러셀 활용 확대 — 평균 인게이지먼트 105.8 (텍스트 22.8의 4.6배). 현재 16개 → 주 1-2회로 늘릴 것",
-        "골든타임 집중 — 오전 8-11시(JST)가 게시량·도달 모두 피크. 핵심 콘텐츠는 이 시간대에 게시",
-        "바이럴 공식 반복 — 1만+ 조회 게시물의 공통점: 공감형 유머/사회이슈+개인경험. IT·일상·시사 크로스오버",
-        "좋아요율 높은 주제 강화 — 좋아요율 TOP 게시물 패턴을 분석해 반복 (좋아요율 = 팬 충성도 지표)",
-        "팔로워 인구통계 활용 — 35-44세 남성(한국) 핵심층. 이 타겟에 맞는 콘텐츠 톤 유지",
-        "답글 유도 — 인게이지먼트율 1.01%는 양호하나, 질문형 마무리로 답글 비중 높이면 알고리즘 가중치 증가",
-        "주말 활동 강화 — 토·일 게시량 감소하나, 경쟁 콘텐츠도 줄어 도달률 높을 가능성",
-    ]
+    strategies = _build_growth_strategies(
+        active, type_stats, viral_posts, demographics,
+        total_views, total_likes, total_replies, total_reposts, total_quotes,
+    )
     for s in strategies:
         ws.cell(row=row, column=1, value=f"• {s}")
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
@@ -902,37 +984,35 @@ def sheet_monthly_trend(wb, posts):
         row += 1
     row += 1
 
-    row = _set_section_title(ws, row, "3. 성장 구간 분석", end_col=5)
+    row = _set_section_title(ws, row, "3. 성장 구간 분석 (시간 분위, 계정 독립)", end_col=5)
     headers = ["구간명", "기간", "게시물수", "평균조회", "평균좋아요", "인게이지먼트율(%)"]
     row = _set_headers(ws, row, headers)
-    phases = [
-        ("초기", "2024-09~2024-12", "2024-09", "2024-12"),
-        ("성장기", "2025-01~2025-06", "2025-01", "2025-06"),
-        ("변동기", "2025-07~2025-12", "2025-07", "2025-12"),
-        ("현재", "2026-01~", "2026-01", None),
-    ]
-    for phase_name, label, start_month, end_month in phases:
-        items = []
-        for _, m in annotated:
-            if not m["dt"]:
-                continue
-            month_key = m["dt"].strftime("%Y-%m")
-            if month_key < start_month:
-                continue
-            if end_month and month_key > end_month:
-                continue
-            items.append(m)
-        total_views = sum(m["views"] for m in items)
-        total_engagement = sum(m["engagement"] for m in items)
-        ws.append([
-            phase_name,
-            label,
-            len(items),
-            round(_avg([m["views"] for m in items])) if items else 0,
-            round(_avg([m["likes"] for m in items]), 1) if items else 0,
-            round((total_engagement / total_views * 100), 2) if total_views else 0,
-        ])
+    dated = sorted(((m["dt"], m) for _, m in annotated if m["dt"]), key=lambda x: x[0])
+    phase_names = ["1분위(초기)", "2분위", "3분위", "4분위(최근)"]
+    n = len(dated)
+    if n == 0:
+        ws.append(["데이터 없음", "-", 0, 0, 0, 0])
         row += 1
+    else:
+        for i, phase_name in enumerate(phase_names):
+            start_i = i * n // 4
+            end_i = (i + 1) * n // 4 if i < 3 else n
+            chunk = dated[start_i:end_i]
+            items = [m for _, m in chunk]
+            if not items:
+                continue
+            label = f"{chunk[0][0].strftime('%Y-%m')}~{chunk[-1][0].strftime('%Y-%m')}"
+            total_views = sum(m["views"] for m in items)
+            total_engagement = sum(m["engagement"] for m in items)
+            ws.append([
+                phase_name,
+                label,
+                len(items),
+                round(_avg([m["views"] for m in items])),
+                round(_avg([m["likes"] for m in items]), 1),
+                round((total_engagement / total_views * 100), 2) if total_views else 0,
+            ])
+            row += 1
 
     ws.freeze_panes = "A3"
     auto_width(ws)
@@ -1013,15 +1093,58 @@ def sheet_growth_strategy(wb, posts, demographics, followers):
         row += 1
     row += 1
 
+    carousel_items = [m for _, m in annotated if m["media_type"] == "CAROUSEL_ALBUM"]
+    text_items = [m for _, m in annotated if m["media_type"] == "TEXT_POST"]
+    if carousel_items and text_items:
+        c_eng = _avg([m["engagement"] for m in carousel_items])
+        t_eng = _avg([m["engagement"] for m in text_items])
+        carousel_effect = f"캐러셀/텍스트 인게이지먼트 {c_eng / t_eng:.1f}배" if t_eng else "텍스트 대비 비교 불가"
+    else:
+        carousel_effect = "타입 비교 데이터 부족"
+
+    hour_avg_views = {}
+    for _, m in annotated:
+        if not m["dt"]:
+            continue
+        hour_avg_views.setdefault(m["dt"].hour, []).append(m["views"])
+    hour_avgs = {h: _avg(vs) for h, vs in hour_avg_views.items() if vs}
+    if hour_avgs:
+        best_h, best_v = max(hour_avgs.items(), key=lambda x: x[1])
+        overall_v = _avg([m["views"] for _, m in annotated if m["dt"]]) or 1
+        time_effect = f"최고 {best_h:02d}시 평균조회 {best_v / overall_v:.1f}배(전체대비)"
+        time_target = f"{best_h:02d}시 집중"
+    else:
+        time_effect = "시간대 데이터 부족"
+        time_target = "성과 상위 시간 분산"
+
+    like_rates_by_len = []
+    for p, m in annotated:
+        if m["media_type"] != "TEXT_POST":
+            continue
+        text_len = len((p.get("text") or "").replace("\n", " ").strip())
+        like_rates_by_len.append((text_len, m["like_rate"]))
+    if like_rates_by_len:
+        best_bucket_rates = []
+        for low, high in [(0, 50), (51, 100), (101, 200), (201, 300), (301, 10**9)]:
+            rates = [r for length, r in like_rates_by_len if low <= length <= high]
+            if rates:
+                best_bucket_rates.append(_avg(rates))
+        if len(best_bucket_rates) >= 2:
+            length_effect = f"길이구간 좋아요율 최대/최소 {max(best_bucket_rates) / max(min(best_bucket_rates), 0.01):.1f}배"
+        else:
+            length_effect = "길이 비교 데이터 부족"
+    else:
+        length_effect = "텍스트 게시물 부족"
+
     row = _set_section_title(ws, row, "2. 즉시 실행 TOP 5", end_col=5)
-    headers = ["우선순위", "액션", "현재값", "목표값", "예상효과"]
+    headers = ["우선순위", "액션", "현재값", "목표값", "데이터 근거"]
     row = _set_headers(ws, row, headers)
     actions = [
-        [1, "캐러셀 주2회", f"현재 {carousel_ratio:.1f}%", "10-15%", "인게이지먼트 4.9배"],
-        [2, "게시시간 13-14시,21시 분산", f"{crowded_hours} 과밀", "13-14시,21시", "평균조회 2-8배"],
-        [3, "100-200자+질문마무리", deadzone_bucket, "100-200자", "좋아요율 4배"],
-        [4, "일일10개 사려깊은 답글", f"답글 {reply_post_ratio:.1f}%", "70%+", "팔로워전환 가속"],
-        [5, "바이오 리뉴얼", "불명확", "뭘얻는지명확", "전환율 2-3배"],
+        [1, "캐러셀 주2회", f"현재 {carousel_ratio:.1f}%", "10-15%", carousel_effect],
+        [2, "게시시간 분산", f"{crowded_hours} 과밀", time_target, time_effect],
+        [3, "최적 길이+질문마무리", deadzone_bucket, "성과 상위 길이대", length_effect],
+        [4, "일일 사려깊은 답글 루틴", f"답글있는글 {reply_post_ratio:.1f}%", "70%+", "답글 비중↑ → 도달 가중 기대"],
+        [5, "바이오 명확화", "프로필 점검", "가치제안 1문장", "전환 경로 명확화"],
     ]
     for values in actions:
         ws.append(values)
@@ -1030,14 +1153,20 @@ def sheet_growth_strategy(wb, posts, demographics, followers):
         row += 1
     row += 1
 
-    row = _set_section_title(ws, row, "3. 10만 로드맵", end_col=5)
+    row = _set_section_title(ws, row, "3. 성장 로드맵 (현재 팔로워 기준 스케일)", end_col=5)
     headers = ["단계", "기간", "목표팔로워", "핵심액션", "KPI"]
     row = _set_headers(ws, row, headers)
+    base = max(followers, 1)
+    # Scale targets from current base toward 100k (or 3x if already large)
+    t1 = max(int(base * 1.5), base + 500)
+    t2 = max(int(base * 3), base + 2000)
+    t3 = max(int(base * 8), base + 10000)
+    t4 = max(100000, int(base * 15))
     roadmap = [
-        ["Phase 1", "1-2개월", "3000", "프로필최적화+캐러셀주2+시간조정", "팔로워주100+증가"],
-        ["Phase 2", "3-4개월", "8000", "질문형마무리+답글루틴+참여팟", "인게이지먼트율2%+"],
-        ["Phase 3", "5-8개월", "25000", "콘텐츠기둥3개+바이럴공식반복+인스타크로스", "월평균조회5000+"],
-        ["Phase 4", "9-18개월", "100000", "권위구축+협업+데이터기반재활용", "바이럴비율5%+"],
+        ["Phase 1", "1-2개월", f"{t1:,}", "프로필최적화+캐러셀주2+시간조정", f"주 +{max(int(base * 0.05), 20):,} 팔로워"],
+        ["Phase 2", "3-4개월", f"{t2:,}", "질문형마무리+답글루틴+참여팟", "인게이지먼트율2%+"],
+        ["Phase 3", "5-8개월", f"{t3:,}", "콘텐츠기둥3개+바이럴공식반복+크로스채널", "월평균조회 상위화"],
+        ["Phase 4", "9-18개월", f"{t4:,}", "권위구축+협업+데이터기반재활용", "바이럴비율5%+"],
     ]
     for values in roadmap:
         ws.append(values)
@@ -1061,28 +1190,47 @@ def sheet_growth_strategy(wb, posts, demographics, followers):
     auto_width(ws)
 
 
-def main():
+def parse_args(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Threads 분석 JSON → Excel 리포트")
+    parser.add_argument(
+        "-i", "--input",
+        default=None,
+        help="analysis_*.json 경로 (미지정 시 output/ 최신 파일)",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default=None,
+        help="출력 xlsx 경로 (미지정 시 output/threads_analysis_YYYYMMDD.xlsx)",
+    )
+    return parser.parse_args(argv)
+
+
+def resolve_input_path(input_arg: str = None) -> str:
     import glob as _glob
+
+    if input_arg:
+        if not os.path.isfile(input_arg):
+            print(f"[ERROR] 입력 파일 없음: {input_arg}")
+            sys.exit(1)
+        return input_arg
 
     output_dir = os.path.join(os.path.dirname(__file__), "output")
     pattern = os.path.join(output_dir, "analysis_*.json")
     json_files = sorted(_glob.glob(pattern))
-
     if not json_files:
         print("[ERROR] output/ 디렉토리에 analysis_*.json 파일이 없습니다.")
         print("  먼저 analyze.py를 실행해주세요.")
         sys.exit(1)
+    return json_files[-1]
 
-    input_path = json_files[-1]  # 가장 최신 파일 사용
-    timestamp = datetime.now(JST).strftime("%Y%m%d")
-    output_path = os.path.join(output_dir, f"threads_analysis_{timestamp}.xlsx")
 
-    data = load_data(input_path)
+def build_workbook(data: dict):
     posts = data.get("posts", [])
     user_insights = data.get("user_insights", {})
     demographics = data.get("follower_demographics", {})
     followers = user_insights.get("followers_count", 0)
-
     username = data.get("profile", {}).get("username", "unknown")
 
     wb = openpyxl.Workbook()
@@ -1092,16 +1240,33 @@ def main():
     sheet_ranking(wb, posts, followers)
     sheet_time_analysis(wb, posts)
     sheet_demographics(wb, demographics, followers)
-    sheet_insights_report(wb, posts, user_insights, followers, username)
+    sheet_insights_report(wb, posts, user_insights, followers, username, demographics)
     sheet_viral_analysis(wb, posts)
     sheet_like_rate_analysis(wb, posts)
     sheet_content_optimization(wb, posts)
     sheet_monthly_trend(wb, posts)
     sheet_growth_strategy(wb, posts, demographics, followers)
+    return wb
 
+
+def main(argv=None):
+    args = parse_args(argv)
+    input_path = resolve_input_path(args.input)
+
+    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now(JST).strftime("%Y%m%d")
+    output_path = args.output or os.path.join(
+        output_dir, f"threads_analysis_{timestamp}.xlsx"
+    )
+
+    print(f"입력: {input_path}")
+    data = load_data(input_path)
+    wb = build_workbook(data)
     wb.save(output_path)
     print(f"Excel 저장 완료: {output_path}")
     print(f"시트: {wb.sheetnames}")
+    print(f"게시물: {len(data.get('posts', []))}개 / 팔로워: {data.get('user_insights', {}).get('followers_count', 0):,}")
 
 
 if __name__ == "__main__":

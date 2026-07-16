@@ -1,10 +1,14 @@
 """
 Threads 계정 종합 분석 스크립트
 
-사용법: python analyze.py
+사용법:
+  python analyze.py
+  python analyze.py --refresh-insights --fail-on-api-error
+  python analyze.py --ttl-days 30 --max-posts 100
 사전 조건: auth.py 실행하여 .env에 ACCESS_TOKEN 저장 완료
 """
 
+import argparse
 import os
 import sys
 import json
@@ -22,28 +26,127 @@ load_dotenv()
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "")
 USER_ID = os.getenv("USER_ID", "me")
 API_BASE = "https://graph.threads.net/v1.0"
+# 0 = never expire; default 7 days (stale views/likes refresh)
+INSIGHTS_CACHE_TTL_DAYS = int(os.getenv("INSIGHTS_CACHE_TTL_DAYS", "7"))
+API_MAX_RETRIES = int(os.getenv("API_MAX_RETRIES", "3"))
+TOKEN_WARN_DAYS = int(os.getenv("TOKEN_WARN_DAYS", "7"))
 
 JST = timezone(timedelta(hours=9))
+UTC = timezone.utc
+
+# Runtime API counters (reset per run)
+_api_stats = {"ok": 0, "error": 0, "timeout": 0, "retry": 0}
 
 
-def api_get(endpoint: str, params: dict = None) -> dict:
-    params = params or {}
+def reset_api_stats():
+    _api_stats.update({"ok": 0, "error": 0, "timeout": 0, "retry": 0})
+
+
+def api_get(endpoint: str, params: dict = None, max_retries: int = None) -> dict:
+    """GET with timeout, 429/5xx backoff, and error counters."""
+    params = dict(params or {})
     params["access_token"] = ACCESS_TOKEN
-    try:
-        resp = requests.get(f"{API_BASE}/{endpoint}", params=params, timeout=30)
-    except requests.exceptions.Timeout:
-        print(f"  [TIMEOUT] {endpoint}: 30초 초과")
-        return {}
-    if resp.status_code != 200:
-        print(f"  [API ERROR] {endpoint}: {resp.status_code} - {resp.text[:200]}")
-        return {}
-    return resp.json()
+    retries = API_MAX_RETRIES if max_retries is None else max_retries
+
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(f"{API_BASE}/{endpoint}", params=params, timeout=30)
+        except requests.exceptions.Timeout:
+            _api_stats["timeout"] += 1
+            if attempt < retries:
+                wait = 2 ** attempt
+                _api_stats["retry"] += 1
+                print(f"  [TIMEOUT] {endpoint}: 재시도 {attempt + 1}/{retries} ({wait}s)")
+                time.sleep(wait)
+                continue
+            print(f"  [TIMEOUT] {endpoint}: 30초 초과 (재시도 소진)")
+            return {}
+        except requests.exceptions.RequestException as exc:
+            _api_stats["error"] += 1
+            if attempt < retries:
+                wait = 2 ** attempt
+                _api_stats["retry"] += 1
+                print(f"  [NETWORK] {endpoint}: {exc} — 재시도 {attempt + 1}/{retries}")
+                time.sleep(wait)
+                continue
+            print(f"  [NETWORK] {endpoint}: {exc}")
+            return {}
+
+        if resp.status_code == 429 or resp.status_code >= 500:
+            _api_stats["retry"] += 1
+            if attempt >= retries:
+                _api_stats["error"] += 1
+                print(
+                    f"  [API ERROR] {endpoint}: {resp.status_code} - {resp.text[:200]} "
+                    f"(재시도 소진)"
+                )
+                return {}
+            retry_after = resp.headers.get("Retry-After", "")
+            if retry_after.isdigit():
+                wait = max(int(retry_after), 1)
+            else:
+                wait = min(2 ** attempt * 2, 60)
+            print(
+                f"  [RATE/SERVER] {endpoint}: {resp.status_code} — "
+                f"{wait}s 후 재시도 ({attempt + 1}/{retries})"
+            )
+            time.sleep(wait)
+            continue
+
+        if resp.status_code != 200:
+            _api_stats["error"] += 1
+            print(f"  [API ERROR] {endpoint}: {resp.status_code} - {resp.text[:200]}")
+            return {}
+
+        _api_stats["ok"] += 1
+        try:
+            return resp.json()
+        except ValueError:
+            _api_stats["error"] += 1
+            print(f"  [API ERROR] {endpoint}: JSON 파싱 실패")
+            return {}
+
+    return {}
 
 
 def validate_token():
     if not ACCESS_TOKEN or ACCESS_TOKEN == "":
         print("[ERROR] ACCESS_TOKEN이 없습니다. 먼저 auth.py를 실행해주세요.")
         sys.exit(1)
+
+
+def warn_token_expiry(warn_days: int = TOKEN_WARN_DAYS) -> None:
+    """Print token expiry status from TOKEN_EXPIRES_AT in .env."""
+    raw = os.getenv("TOKEN_EXPIRES_AT", "").strip()
+    if not raw:
+        print(
+            "[WARN] TOKEN_EXPIRES_AT 없음. auth.py/refresh_token.py 재실행 시 기록됩니다. "
+            "만료 전 refresh_token.py 권장."
+        )
+        return
+    try:
+        expires_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+    except ValueError:
+        print(f"[WARN] TOKEN_EXPIRES_AT 형식 오류: {raw}")
+        return
+
+    now = datetime.now(UTC)
+    remaining = expires_at.astimezone(UTC) - now
+    days_left = remaining.total_seconds() / 86400
+    local = expires_at.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+
+    if days_left <= 0:
+        print(f"[ERROR] 토큰 만료됨 ({local}). auth.py를 다시 실행하세요.")
+        sys.exit(1)
+    if days_left <= warn_days:
+        print(
+            f"[WARN] 토큰 {days_left:.1f}일 후 만료 예정 ({local}). "
+            f"python refresh_token.py 실행을 권장합니다."
+        )
+    else:
+        print(f"토큰 유효: 약 {days_left:.0f}일 남음 (만료 {local})")
 
 
 def fetch_profile() -> dict:
@@ -64,7 +167,7 @@ def fetch_profile() -> dict:
     return data
 
 
-def fetch_all_posts() -> list:
+def fetch_all_posts(max_posts: int = None) -> list:
     print("\n2. 게시물 전체 조회 중...")
     all_posts = []
     fields = "id,media_type,text,timestamp,permalink,like_count,replies_count"
@@ -81,6 +184,11 @@ def fetch_all_posts() -> list:
         all_posts.extend(posts)
         print(f"  페이지 {page}: {len(posts)}개 로드 (총 {len(all_posts)}개)")
 
+        if max_posts is not None and len(all_posts) >= max_posts:
+            all_posts = all_posts[:max_posts]
+            print(f"  --max-posts={max_posts} 적용, 수집 중단")
+            break
+
         cursors = data.get("paging", {}).get("cursors", {})
         after = cursors.get("after")
         if not after or len(posts) < 100:
@@ -94,21 +202,89 @@ def fetch_all_posts() -> list:
     return all_posts
 
 
-def fetch_post_insights(posts: list) -> list:
+def _load_insights_cache(cache_path: str) -> dict:
+    """Load insights cache. Migrate v1 {id: metrics} → v2 {id: {fetched_at, metrics}}."""
+    if not os.path.exists(cache_path):
+        return {}
+    with open(cache_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        return {}
+
+    if raw.get("version") == 2 and isinstance(raw.get("entries"), dict):
+        return raw["entries"]
+
+    entries = {}
+    for media_id, value in raw.items():
+        if media_id == "version":
+            continue
+        if not isinstance(value, dict):
+            continue
+        if "metrics" in value and isinstance(value["metrics"], dict):
+            entries[media_id] = {
+                "fetched_at": value.get("fetched_at", "1970-01-01T00:00:00+00:00"),
+                "metrics": value["metrics"],
+            }
+        else:
+            # v1 flat metrics: no timestamp → force refresh once under TTL
+            entries[media_id] = {
+                "fetched_at": "1970-01-01T00:00:00+00:00",
+                "metrics": value,
+            }
+    return entries
+
+
+def _is_cache_fresh(entry: dict, ttl_days: int) -> bool:
+    if ttl_days <= 0:
+        return True
+    fetched_at = entry.get("fetched_at")
+    if not fetched_at:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        age = datetime.now(UTC) - ts.astimezone(UTC)
+        return age <= timedelta(days=ttl_days)
+    except ValueError:
+        return False
+
+
+def _save_insights_cache(cache_path: str, entries: dict) -> None:
+    """Atomic write so crash mid-save does not corrupt the cache file."""
+    payload = {"version": 2, "entries": entries}
+    tmp_path = cache_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp_path, cache_path)
+
+
+def fetch_post_insights(
+    posts: list,
+    ttl_days: int = None,
+    force_refresh: bool = False,
+    max_workers: int = 5,
+) -> list:
     print("\n3. 게시물별 인사이트 수집 중 (5 병렬, 배치 저장)...")
     total = len(posts)
+    ttl = INSIGHTS_CACHE_TTL_DAYS if ttl_days is None else ttl_days
     metrics = "views,likes,replies,reposts,quotes,shares"
     cache_path = os.path.join(os.path.dirname(__file__), "output", "insights_cache.json")
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
-    cached = {}
-    if os.path.exists(cache_path):
-        with open(cache_path, "r") as f:
-            cached = json.load(f)
-        print(f"  캐시에서 {len(cached)}개 로드됨")
-
-    to_fetch = [p for p in posts if p["id"] not in cached]
-    print(f"  신규 조회 필요: {len(to_fetch)}개 / 총 {total}개")
+    cached = _load_insights_cache(cache_path)
+    if force_refresh:
+        fresh_count = 0
+        print(f"  캐시 로드: {len(cached)}개 (--refresh-insights: 전체 재조회)")
+        to_fetch = list(posts)
+    else:
+        fresh_count = sum(1 for e in cached.values() if _is_cache_fresh(e, ttl))
+        print(f"  캐시 로드: {len(cached)}개 (TTL {ttl}일 이내 유효: {fresh_count}개)")
+        to_fetch = [
+            p for p in posts
+            if p["id"] not in cached or not _is_cache_fresh(cached[p["id"]], ttl)
+        ]
+    print(f"  신규/만료 재조회: {len(to_fetch)}개 / 총 {total}개")
 
     def fetch_single(post):
         media_id = post["id"]
@@ -122,28 +298,53 @@ def fetch_post_insights(posts: list) -> list:
 
     BATCH_SIZE = 100
     done = 0
+    fetched_at = datetime.now(UTC).isoformat()
     for batch_start in range(0, len(to_fetch), BATCH_SIZE):
         batch = to_fetch[batch_start:batch_start + BATCH_SIZE]
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(fetch_single, p): p for p in batch}
             for future in as_completed(futures):
-                media_id, insight_map = future.result()
-                cached[media_id] = insight_map
+                try:
+                    media_id, insight_map = future.result()
+                except Exception as exc:
+                    post = futures[future]
+                    print(f"  [ERROR] insights {post.get('id')}: {exc}")
+                    continue
+                # Keep previous metrics if API returned empty (transient failure)
+                if not insight_map and media_id in cached:
+                    continue
+                cached[media_id] = {
+                    "fetched_at": fetched_at,
+                    "metrics": insight_map,
+                }
                 done += 1
                 if done % 50 == 0:
                     print(f"  {done}/{len(to_fetch)} 완료")
 
-        with open(cache_path, "w") as f:
-            json.dump(cached, f)
+        _save_insights_cache(cache_path, cached)
         print(f"  배치 저장 ({batch_start + len(batch)}/{len(to_fetch)})")
 
     print(f"  전체 인사이트 수집 완료: {len(cached)}개")
 
     enriched = []
     for p in posts:
-        p["insights"] = cached.get(p["id"], {})
+        entry = cached.get(p["id"], {})
+        p["insights"] = entry.get("metrics", {}) if isinstance(entry, dict) else {}
         enriched.append(p)
     return enriched
+
+
+def _insight_total(item: dict) -> int:
+    total_value = item.get("total_value")
+    if isinstance(total_value, dict):
+        value = total_value.get("value")
+        if isinstance(value, (int, float)):
+            return int(value)
+
+    values = item.get("values", [])
+    if isinstance(values, list):
+        return sum(v.get("value", 0) for v in values if isinstance(v, dict))
+    return 0
 
 
 def fetch_user_insights() -> dict:
@@ -156,7 +357,7 @@ def fetch_user_insights() -> dict:
     )
     for item in followers_data.get("data", []):
         if item["name"] == "followers_count":
-            result["followers_count"] = item.get("values", [{}])[0].get("value", 0)
+            result["followers_count"] = _insight_total(item)
 
     now = datetime.now(JST)
     since = int((now - timedelta(days=30)).timestamp())
@@ -172,9 +373,7 @@ def fetch_user_insights() -> dict:
     )
     for item in period_data.get("data", []):
         name = item["name"]
-        values = item.get("values", [])
-        total = sum(v.get("value", 0) for v in values)
-        result[f"30d_{name}"] = total
+        result[f"30d_{name}"] = _insight_total(item)
 
     rows = [
         ["팔로워 수", result.get("followers_count", "-")],
@@ -233,12 +432,14 @@ def print_post_ranking(posts: list):
     print("6. 게시물 성과 랭킹")
     print("=" * 60)
 
+    active = [p for p in posts if p.get("media_type") != "REPOST_FACADE"]
+
     def get_engagement(p):
-        ins = p.get("insights", {})
+        ins = p.get("insights") or {}
         return ins.get("likes", 0) + ins.get("replies", 0) + ins.get("reposts", 0) + ins.get("quotes", 0)
 
-    sorted_by_engagement = sorted(posts, key=get_engagement, reverse=True)[:15]
-    sorted_by_views = sorted(posts, key=lambda p: p.get("insights", {}).get("views", 0), reverse=True)[:15]
+    sorted_by_engagement = sorted(active, key=get_engagement, reverse=True)[:15]
+    sorted_by_views = sorted(active, key=lambda p: (p.get("insights") or {}).get("views", 0), reverse=True)[:15]
 
     print("\n[인게이지먼트 TOP 15]")
     rows = []
@@ -277,15 +478,21 @@ def print_content_analysis(posts: list):
     print("7. 콘텐츠 분석")
     print("=" * 60)
 
+    active = [p for p in posts if p.get("media_type") != "REPOST_FACADE"]
     type_counter = Counter()
     type_engagement = {}
 
-    for p in posts:
+    for p in active:
         media_type = p.get("media_type", "UNKNOWN")
         type_counter[media_type] += 1
 
-        ins = p.get("insights", {})
-        engagement = ins.get("likes", 0) + ins.get("replies", 0) + ins.get("reposts", 0)
+        ins = p.get("insights") or {}
+        engagement = (
+            ins.get("likes", 0)
+            + ins.get("replies", 0)
+            + ins.get("reposts", 0)
+            + ins.get("quotes", 0)
+        )
         if media_type not in type_engagement:
             type_engagement[media_type] = []
         type_engagement[media_type].append(engagement)
@@ -298,9 +505,9 @@ def print_content_analysis(posts: list):
         rows.append([mtype, count, f"{avg_eng:.1f}"])
     print(tabulate(rows, headers=["타입", "게시물 수", "평균 인게이지먼트"], tablefmt="simple_outline"))
 
-    if posts:
+    if active:
         timestamps = []
-        for p in posts:
+        for p in active:
             ts = p.get("timestamp", "")
             if ts:
                 try:
@@ -311,7 +518,11 @@ def print_content_analysis(posts: list):
 
         if timestamps:
             hour_counter = Counter(dt.astimezone(JST).hour for dt in timestamps)
-            weekday_counter = Counter(dt.astimezone(JST).strftime("%A") for dt in timestamps)
+            # Locale-independent weekday keys (match export_excel)
+            weekday_counter = Counter(
+                ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][dt.astimezone(JST).weekday()]
+                for dt in timestamps
+            )
 
             print("\n[시간대별 게시 빈도 (JST)]")
             rows = []
@@ -337,17 +548,22 @@ def print_summary(profile: dict, posts: list, user_insights: dict):
     print("8. 종합 요약")
     print("=" * 60)
 
-    total_posts = len(posts)
+    active = [p for p in posts if p.get("media_type") != "REPOST_FACADE"]
+    total_posts = len(active)
     followers = user_insights.get("followers_count", 0)
 
-    total_likes = sum(p.get("insights", {}).get("likes", 0) for p in posts)
-    total_views = sum(p.get("insights", {}).get("views", 0) for p in posts)
-    total_replies = sum(p.get("insights", {}).get("replies", 0) for p in posts)
-    total_reposts = sum(p.get("insights", {}).get("reposts", 0) for p in posts)
+    total_likes = sum((p.get("insights") or {}).get("likes", 0) for p in active)
+    total_views = sum((p.get("insights") or {}).get("views", 0) for p in active)
+    total_replies = sum((p.get("insights") or {}).get("replies", 0) for p in active)
+    total_reposts = sum((p.get("insights") or {}).get("reposts", 0) for p in active)
+    total_quotes = sum((p.get("insights") or {}).get("quotes", 0) for p in active)
 
     avg_likes = total_likes / total_posts if total_posts else 0
     avg_views = total_views / total_posts if total_posts else 0
-    engagement_rate = (total_likes + total_replies + total_reposts) / total_views * 100 if total_views else 0
+    engagement_rate = (
+        (total_likes + total_replies + total_reposts + total_quotes) / total_views * 100
+        if total_views else 0
+    )
 
     rows = [
         ["계정", f"@{profile.get('username', '-')}"],
@@ -364,7 +580,7 @@ def print_summary(profile: dict, posts: list, user_insights: dict):
     print(tabulate(rows, headers=["지표", "값"], tablefmt="simple_outline"))
 
 
-def save_raw_data(profile, posts, user_insights, demographics):
+def save_raw_data(profile, posts, user_insights, demographics) -> str:
     output_dir = os.path.join(os.path.dirname(__file__), "output")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -383,28 +599,134 @@ def save_raw_data(profile, posts, user_insights, demographics):
         json.dump(export, f, ensure_ascii=False, indent=2)
 
     print(f"\n원본 데이터 저장: {filepath}")
+    return filepath
 
 
-def main():
+def save_archive(profile, posts, user_insights, source_path: str = None) -> str:
+    """Build text 저장함 under output/저장함/."""
+    from archive import save_text_archive
+
+    snap = save_text_archive(
+        profile=profile or {},
+        posts=posts or [],
+        user_insights=user_insights or {},
+        source_path=source_path,
+    )
+    print(f"텍스트 저장함: {snap}")
+    print(f"  → 최신: {os.path.join(os.path.dirname(__file__), 'output', '저장함', 'latest')}")
+    return snap
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Threads 계정 종합 분석")
+    parser.add_argument(
+        "--refresh-insights",
+        action="store_true",
+        help="인사이트 캐시 TTL 무시, 전체 재조회",
+    )
+    parser.add_argument(
+        "--ttl-days",
+        type=int,
+        default=None,
+        help="캐시 TTL(일). 미지정 시 env INSIGHTS_CACHE_TTL_DAYS 또는 7",
+    )
+    parser.add_argument(
+        "--max-posts",
+        type=int,
+        default=None,
+        help="수집 게시물 상한 (테스트·빠른 샘플용)",
+    )
+    parser.add_argument(
+        "--skip-demographics",
+        action="store_true",
+        help="팔로워 인구통계 조회 생략",
+    )
+    parser.add_argument(
+        "--fail-on-api-error",
+        action="store_true",
+        help="API 오류/타임아웃이 1건 이상이면 exit code 2",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=5,
+        help="인사이트 병렬 워커 수 (기본 5)",
+    )
+    parser.add_argument(
+        "--skip-archive",
+        action="store_true",
+        help="텍스트 저장함(output/저장함) 생성 생략",
+    )
+    parser.add_argument(
+        "--export-excel",
+        action="store_true",
+        help="분석 직후 export_excel.py 자동 실행",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    reset_api_stats()
     validate_token()
+    warn_token_expiry()
 
     print("=" * 60)
-    print(f"  Threads 계정 종합 분석")
+    print("  Threads 계정 종합 분석")
     print(f"  실행 시각: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} (JST)")
+    if args.refresh_insights:
+        print("  옵션: --refresh-insights")
+    if args.ttl_days is not None:
+        print(f"  옵션: --ttl-days={args.ttl_days}")
+    if args.max_posts is not None:
+        print(f"  옵션: --max-posts={args.max_posts}")
     print("=" * 60)
 
     profile = fetch_profile()
-    posts = fetch_all_posts()
-    enriched_posts = fetch_post_insights(posts)
+    if not profile:
+        print("[ERROR] 프로필 조회 실패. 토큰/권한을 확인하세요.")
+        sys.exit(1)
+
+    posts = fetch_all_posts(max_posts=args.max_posts)
+    if not posts:
+        print("[ERROR] 게시물이 없거나 조회에 실패했습니다.")
+        if args.fail_on_api_error or _api_stats["error"] or _api_stats["timeout"]:
+            sys.exit(2)
+        sys.exit(1)
+
+    enriched_posts = fetch_post_insights(
+        posts,
+        ttl_days=args.ttl_days,
+        force_refresh=args.refresh_insights,
+        max_workers=max(1, args.workers),
+    )
     user_insights = fetch_user_insights()
-    demographics = fetch_follower_demographics()
+    demographics = {} if args.skip_demographics else fetch_follower_demographics()
 
     print_post_ranking(enriched_posts)
     print_content_analysis(enriched_posts)
     print_summary(profile, enriched_posts, user_insights)
-    save_raw_data(profile, enriched_posts, user_insights, demographics)
+    json_path = save_raw_data(profile, enriched_posts, user_insights, demographics)
 
+    if not args.skip_archive:
+        save_archive(profile, enriched_posts, user_insights, source_path=json_path)
+
+    if args.export_excel:
+        try:
+            from export_excel import main as export_main
+            export_main(["-i", json_path])
+        except Exception as exc:
+            print(f"[WARN] Excel 자동 생성 실패: {exc}")
+
+    print(
+        f"\nAPI 통계: ok={_api_stats['ok']} error={_api_stats['error']} "
+        f"timeout={_api_stats['timeout']} retry={_api_stats['retry']}"
+    )
     print("\n분석 완료!")
+
+    if args.fail_on_api_error and (_api_stats["error"] or _api_stats["timeout"]):
+        print("[ERROR] API 오류가 발생했습니다 (--fail-on-api-error).")
+        sys.exit(2)
 
 
 if __name__ == "__main__":

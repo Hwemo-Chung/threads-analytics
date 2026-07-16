@@ -1,15 +1,27 @@
-# 환경변수 (API 키, 토큰)
+# 환경변수 / 시크릿
 .env
+.env.*
+!.env.example
 
-# 분석 결과 데이터 (개인 계정 데이터 포함)
+# 개인 산출물 (분석 JSON/Excel/저장함/로그)
 output/
+*.xlsx
+*.log
+run.log
 
-# SSL 인증서
+# SSL 인증서 (로컬 OAuth)
 localhost.crt
 localhost.key
+*.pem
+*.key
+!requirements*.txt
 
-# IDE
+# IDE / 로컬 도구
 .vscode/
+.idea/
+.ruff_cache/
+.omo/
+.debug-journal.md
 
 # Python
 __pycache__/
@@ -19,7 +31,16 @@ __pycache__/
 dist/
 build/
 *.egg
+.venv/
+venv/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# 로컬 전용 콘텐츠·기획 (공개 repo = analytics 코드만)
+release/
+THREADS_WRITING_GUIDELINES.md
+THREADS_PLAYWRIGHT_COLLECTOR_PROMPTS.md
+first-revenue-consulting-plan.md
+PRD.md

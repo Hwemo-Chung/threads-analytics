@@ -56,7 +56,10 @@ cp .env.example .env
 THREADS_APP_ID=your_app_id_here
 THREADS_APP_SECRET=your_app_secret_here
 REDIRECT_URI=https://localhost:8888/callback
+INSIGHTS_CACHE_TTL_DAYS=7
 ```
+
+> `INSIGHTS_CACHE_TTL_DAYS`: 게시물 인사이트 캐시 유효 기간(일). 만료된 항목만 재조회합니다. `0`이면 만료 없음.
 
 ### 2. SSL 인증서 생성
 
@@ -86,24 +89,38 @@ python auth.py
 ### Step 2: 데이터 수집 & 분석
 
 ```bash
-python analyze.py
+python3 analyze.py
 ```
 
 - 전체 게시물을 페이지네이션으로 수집
-- 게시물별 인사이트를 5개 병렬로 수집 (캐시 지원)
+- 게시물별 인사이트를 5개 병렬로 수집 (캐시 + TTL)
 - 계정 인사이트 + 팔로워 인구통계 수집
-- 터미널에 분석 요약 출력
-- `output/` 디렉토리에 JSON 원본 데이터 저장
+- 토큰 만료 사전 경고 (`TOKEN_EXPIRES_AT`)
+- 429/5xx 자동 재시도
+- 터미널 요약 + `output/analysis_*.json` 저장
+
+**주요 옵션:**
+
+```bash
+python3 analyze.py --refresh-insights          # 캐시 무시, 인사이트 전체 재조회
+python3 analyze.py --ttl-days 30               # 이번 실행만 TTL 30일
+python3 analyze.py --max-posts 100             # 최근 페이지 기준 상한 (빠른 샘플)
+python3 analyze.py --skip-demographics         # 인구통계 생략
+python3 analyze.py --fail-on-api-error         # API 오류 시 exit 2
+python3 analyze.py --workers 3                 # 병렬 워커 수
+```
 
 > ⚠️ API 호출이 많아 **약 10분** 소요될 수 있습니다. tmux 등에서 실행을 권장합니다.
 
 ### Step 3: Excel 리포트 생성
 
 ```bash
-python export_excel.py
+python3 export_excel.py
+python3 export_excel.py -i output/analysis_YYYYMMDD_HHMMSS.json
+python3 export_excel.py -i path/to.json -o path/to/report.xlsx
 ```
 
-`output/` 디렉토리에서 가장 최신 분석 JSON을 읽어 Excel 리포트를 생성합니다.
+기본: `output/` 최신 `analysis_*.json` → `output/threads_analysis_YYYYMMDD.xlsx`
 
 **생성되는 시트 (10개):**
 
@@ -123,34 +140,76 @@ python export_excel.py
 ### 토큰 갱신 (60일마다)
 
 ```bash
-python refresh_token.py
+python3 refresh_token.py
 ```
 
-토큰 만료 전에 실행하면 60일 연장됩니다. 만료된 경우 `auth.py`를 다시 실행해주세요.
+토큰 만료 전에 실행하면 60일 연장되고 `TOKEN_EXPIRES_AT`이 갱신됩니다.  
+`analyze.py`는 만료 7일 전(`TOKEN_WARN_DAYS`) 경고, 만료 시 중단합니다.  
+이미 만료된 경우 `auth.py`를 다시 실행하세요.
+
+### 텍스트 저장함
+
+분석 JSON에서 전체 게시 본문을 정리해 `output/저장함/`에 둡니다.
+
+```bash
+python3 archive.py                              # 최신 analysis_*.json
+python3 archive.py -i output/analysis_....json  # 특정 파일
+```
+
+또는 분석 시 자동 생성(기본 ON, `--skip-archive`로 끄기):
+
+```bash
+python3 analyze.py
+python3 analyze.py --export-excel   # 분석 + 저장함 + Excel
+```
+
+**저장함 구조:**
+
+```
+output/저장함/
+├── latest/                 # 항상 최신 스냅샷 복사본
+│   ├── README.md
+│   ├── all_texts.md        # 전체 본문 (최신순)
+│   ├── text_only.txt       # 본문만
+│   ├── all_posts.jsonl
+│   ├── index.csv
+│   ├── by_month/*.md
+│   └── by_type/*.md
+└── snapshots/YYYYMMDD_HHMMSS/   # 이력 보관
+```
+
+> Meta API에는 앱 북마크(타인 글 저장함) 조회 엔드포인트가 **없습니다**.  
+> 이 저장함은 **본인 게시글 텍스트 아카이브**입니다.
+
+### 테스트
+
+```bash
+python3 -m unittest discover -s tests -v
+```
 
 ## 프로젝트 구조
 
 ```
 threads-analytics/
-├── auth.py              # OAuth 2.0 인증 (HTTPS 로컬서버)
-├── analyze.py           # 게시물 수집 + 인사이트 분석
-├── export_excel.py      # JSON → Excel 10시트 리포트
+├── auth.py              # OAuth 2.0 (HTTPS, state CSRF, TOKEN_EXPIRES_AT)
+├── analyze.py           # 수집·분석 (재시도, TTL, CLI, 저장함)
+├── archive.py           # 게시 텍스트 저장함
+├── export_excel.py      # JSON → Excel 10시트 (-i/-o)
 ├── refresh_token.py     # 장기 토큰 갱신
-├── requirements.txt     # Python 의존성
-├── .env.example         # 환경변수 템플릿
+├── tests/               # 단위 테스트 (네트워크 없음)
+├── requirements.txt
+├── .env.example
 ├── .gitignore
-└── output/              # 분석 결과 (gitignore됨)
-    ├── analysis_*.json
-    ├── insights_cache.json
-    └── threads_analysis_*.xlsx
+└── output/              # 분석 결과 (gitignore)
 ```
 
 ## API 참고사항
 
-- **Rate Limit**: 약 4,800 calls/hour (Threads API)
-- **토큰 유효기간**: 장기 토큰 60일, `refresh_token.py`로 갱신
+- **Rate Limit**: 약 4,800 calls/hour (Threads API). 429/5xx는 자동 백오프 재시도
+- **토큰 유효기간**: 장기 토큰 60일, `TOKEN_EXPIRES_AT` 기록, `refresh_token.py`로 갱신
 - **팔로워 인구통계**: 팔로워 100명 이상부터 제공
-- **인사이트 캐시**: `insights_cache.json`에 저장되어 재실행 시 중복 호출 방지
+- **인사이트 캐시**: v2 + TTL(`INSIGHTS_CACHE_TTL_DAYS`, 기본 7일). `--refresh-insights`로 강제 재조회
+- **저장소 범위**: 공개 대상은 분석 스크립트·문서. 마케팅/라이팅 킷(`release/` 등)은 로컬 전용(gitignore)
 
 ## 라이선스
 
