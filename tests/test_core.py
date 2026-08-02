@@ -27,7 +27,10 @@ class TestInsightTotal(unittest.TestCase):
         self.assertEqual(analyze._insight_total(item), 30)
 
     def test_empty(self):
-        self.assertEqual(analyze._insight_total({}), 0)
+        # 의도 변경: 예전엔 0을 돌려줘 결측이 진짜 0으로 저장됐다. 이제 결측은 None.
+        self.assertIsNone(analyze._insight_total({}))
+        self.assertIsNone(analyze._insight_total({"values": []}))
+        self.assertEqual(analyze._insight_total({"total_value": {"value": 0}}), 0)
 
 
 class TestInsightsCache(unittest.TestCase):
@@ -144,13 +147,57 @@ class TestExportCli(unittest.TestCase):
                     "reposts": 0, "quotes": 0, "shares": 0,
                 },
             }],
-            "user_insights": {"followers_count": 500, "30d_views": 1000},
+            "user_insights": {
+                "followers_count": 500,
+                "30d_views": 1000,
+                "daily_views": [
+                    {"date": f"2026-0{1 + i // 28}-{i % 28 + 1:02d}", "value": i * 10}
+                    for i in range(100)
+                ],
+            },
             "follower_demographics": {"country": {"KR": 100}},
         }
-        wb = export_excel.build_workbook(data)
-        self.assertEqual(len(wb.sheetnames), 10)
+        # load_snapshots()는 실제 output/ 디렉터리를 읽으므로 고정해야 테스트가 결정적이다
+        with patch.object(export_excel, "load_snapshots", return_value=[]):
+            self.assertEqual(len(export_excel.build_workbook(data).sheetnames), 11)
+        # 스냅샷 2개 이상일 때만 '스냅샷 성장추이' 시트가 붙는다
+        snap = {
+            "label": "2026-01-01 00:00", "dt": datetime(2026, 1, 1), "posts_total": 1,
+            "reposts": 0, "active": 1, "followers": 10, "views_30d": 100,
+            "likes_30d": 10, "flags": [], "by_id": {},
+        }
+        with patch.object(export_excel, "load_snapshots", return_value=[snap, dict(snap, dt=datetime(2026, 2, 1), label="2026-02-01 00:00")]):
+            wb = export_excel.build_workbook(data)
+        self.assertEqual(len(wb.sheetnames), 12)
+        self.assertIn("스냅샷 성장추이", wb.sheetnames)
         self.assertIn("전체 게시물", wb.sheetnames)
+        self.assertIn("일별 조회수 추이", wb.sheetnames)
         self.assertIn("10만 성장전략", wb.sheetnames)
+
+
+class TestLongitudinal(unittest.TestCase):
+    def test_missing_follower_snapshot_never_diffed(self):
+        def snap(label, followers, dt):
+            return {
+                "label": label, "dt": dt, "posts_total": 10, "reposts": 1, "active": 9,
+                "followers": followers, "views_30d": 100, "likes_30d": 0,
+                "flags": [] if followers > 0 else ["팔로워 데이터 결측"], "by_id": {},
+            }
+
+        wb = export_excel.openpyxl.Workbook()
+        wb.remove(wb.active)
+        # 0일 구간은 이제 생략되므로 fixture에 실제 날짜를 준다 (검증 의도는 동일)
+        export_excel.sheet_longitudinal(wb, [
+            snap("A", 1493, datetime(2026, 4, 27)),
+            snap("B", 0, datetime(2026, 6, 13)),
+            snap("C", 1614, datetime(2026, 7, 16)),
+        ])
+        ws = wb["스냅샷 성장추이"]
+        col_a = [ws.cell(row=r, column=1).value for r in range(1, ws.max_row + 1)]
+        hdr = col_a.index("구간") + 1  # 2. 구간별 성장률 헤더 행
+        # 결측 스냅샷을 끼고 diff하면 -1493 같은 가짜 급감이 나온다 → 두 구간 모두 '-'
+        self.assertEqual([ws.cell(row=hdr + 1, column=4).value, ws.cell(row=hdr + 2, column=4).value], ["-", "-"])
+        self.assertIn("데이터 없음", [ws.cell(row=r, column=1).value for r in range(1, ws.max_row + 1)])
 
 
 class TestTokenWarn(unittest.TestCase):

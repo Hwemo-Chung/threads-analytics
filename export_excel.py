@@ -2,6 +2,7 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from calendar import monthrange
 from collections import Counter
 
 import openpyxl
@@ -25,6 +26,10 @@ HEADER_FILL = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="s
 HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
 SUB_FILL = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
 HIGHLIGHT_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+VIRAL_PERCENTILE = 99
+# 조회수가 이 값 미만이면 '데드' 게시물로 간주 (여러 시트가 동일 기준을 공유)
+DEAD_VIEWS = 500
 
 
 def style_header(ws, row, max_col):
@@ -152,84 +157,84 @@ def sheet_ranking(wb, posts, followers):
     auto_width(ws)
 
 
+_TIME_MIN_SAMPLE = 30
+
+
+def _time_bucket_row(label, metrics, overall_median):
+    """구간 1행 = (셀 리스트, 우수 여부). 평균은 바이럴 1건에 끌려가므로 판정은 중앙값 기준."""
+    n = len(metrics)
+    if not n:
+        return [label, 0, 0, 0, 0.0, 0.0, 0.0, "표본부족"], False
+    views = [m["views"] for m in metrics]
+    median_views = _median(views)
+    dead_rate = sum(1 for v in views if v < DEAD_VIEWS) / n * 100
+    if n < _TIME_MIN_SAMPLE:
+        verdict = "표본부족"
+    elif median_views >= overall_median * 1.2:
+        verdict = "🟢우수"
+    elif median_views <= overall_median * 0.8:
+        verdict = "🔴회피"
+    else:
+        verdict = "⚪보통"
+    return [
+        label,
+        n,
+        round(median_views),
+        round(_avg(views)),
+        round(dead_rate, 2),
+        round(_median([m["likes"] for m in metrics]), 1),
+        round(_avg([m["engagement"] for m in metrics]), 1),
+        verdict,
+    ], verdict == "🟢우수"
+
+
 def sheet_time_analysis(wb, posts):
     ws = wb.create_sheet("시간대 분석")
-    active_posts = [p for p in posts if p.get("media_type") != "REPOST_FACADE"]
+    annotated = [_post_metrics(p) for p in _active_posts(posts)]
+    dated = [m for m in annotated if m["dt"]]
 
     hour_data = {}
     weekday_data = {}
     day_kr = {"Monday": "월", "Tuesday": "화", "Wednesday": "수", "Thursday": "목", "Friday": "금", "Saturday": "토", "Sunday": "일"}
 
-    for p in active_posts:
-        dt = parse_ts(p.get("timestamp"))
-        if not dt:
-            continue
-        ins = (p.get("insights") or {})
-        views = ins.get("views", 0)
-        likes = ins.get("likes", 0)
-        engagement = likes + ins.get("replies", 0) + ins.get("reposts", 0) + ins.get("quotes", 0)
+    for m in dated:
+        hour_data.setdefault(m["dt"].hour, []).append(m)
+        weekday_data.setdefault(_weekday_en(m["dt"]), []).append(m)
 
-        h = dt.hour
-        if h not in hour_data:
-            hour_data[h] = {"count": 0, "views": 0, "likes": 0, "engagement": 0}
-        hour_data[h]["count"] += 1
-        hour_data[h]["views"] += views
-        hour_data[h]["likes"] += likes
-        hour_data[h]["engagement"] += engagement
+    overall_median = _median([m["views"] for m in dated])
 
-        wd = _weekday_en(dt)
-        if wd not in weekday_data:
-            weekday_data[wd] = {"count": 0, "views": 0, "likes": 0, "engagement": 0}
-        weekday_data[wd]["count"] += 1
-        weekday_data[wd]["views"] += views
-        weekday_data[wd]["likes"] += likes
-        weekday_data[wd]["engagement"] += engagement
-
-    ws.cell(row=1, column=1, value="시간대별 성과 (JST)").font = Font(bold=True, size=13)
-    headers = ["시간", "게시수", "총조회수", "평균조회수", "총좋아요", "평균좋아요", "평균인게이지먼트"]
+    ws.cell(row=1, column=1, value=f"시간대별 성과 (JST, 중앙값 기준 · 데드={DEAD_VIEWS}조회 미만 · 판정은 {_TIME_MIN_SAMPLE}건 이상)").font = Font(bold=True, size=13)
+    headers = ["시간", "게시수", "중앙값조회", "평균조회", "데드율(%)", "중앙값좋아요", "평균인게이지먼트", "판정"]
     for c, h in enumerate(headers, 1):
         ws.cell(row=2, column=c, value=h)
     style_header(ws, 2, len(headers))
 
-    best_hour_avg_views = 0
-    for h in range(24):
-        d = hour_data.get(h, {"count": 0, "views": 0, "likes": 0, "engagement": 0})
-        cnt = d["count"] or 1
-        avg_views = d["views"] / cnt
-        if avg_views > best_hour_avg_views:
-            best_hour_avg_views = avg_views
-        ws.cell(row=3 + h, column=1, value=f"{h:02d}:00")
-        ws.cell(row=3 + h, column=2, value=d["count"])
-        ws.cell(row=3 + h, column=3, value=d["views"])
-        ws.cell(row=3 + h, column=4, value=round(avg_views))
-        ws.cell(row=3 + h, column=5, value=d["likes"])
-        ws.cell(row=3 + h, column=6, value=round(d["likes"] / cnt, 1))
-        ws.cell(row=3 + h, column=7, value=round(d["engagement"] / cnt, 1))
+    if not dated:
+        ws.cell(row=3, column=1, value="데이터 없음")
+        auto_width(ws)
+        return
 
     for h in range(24):
-        d = hour_data.get(h, {"count": 0, "views": 0})
-        cnt = d["count"] or 1
-        if d["views"] / cnt >= best_hour_avg_views * 0.8:
-            for c in range(1, len(headers) + 1):
-                ws.cell(row=3 + h, column=c).fill = HIGHLIGHT_FILL
+        values, is_best = _time_bucket_row(f"{h:02d}:00", hour_data.get(h, []), overall_median)
+        for c, v in enumerate(values, 1):
+            ws.cell(row=3 + h, column=c, value=v)
+        if is_best:
+            _fill_row(ws, 3 + h, len(headers), HIGHLIGHT_FILL)
 
     row_start = 28
     ws.cell(row=row_start, column=1, value="요일별 성과").font = Font(bold=True, size=13)
-    for c, h in enumerate(headers, 1):
-        ws.cell(row=row_start + 1, column=c, value=h.replace("시간", "요일"))
-    style_header(ws, row_start + 1, len(headers))
+    weekday_headers = ["요일", "게시수", "중앙값조회", "평균조회", "데드율(%)", "중앙값좋아요", "평균인게이지먼트", "판정"]
+    for c, h in enumerate(weekday_headers, 1):
+        ws.cell(row=row_start + 1, column=c, value=h)
+    style_header(ws, row_start + 1, len(weekday_headers))
 
     for i, day in enumerate(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]):
-        d = weekday_data.get(day, {"count": 0, "views": 0, "likes": 0, "engagement": 0})
-        cnt = d["count"] or 1
+        values, is_best = _time_bucket_row(day_kr.get(day, day), weekday_data.get(day, []), overall_median)
         r = row_start + 2 + i
-        ws.cell(row=r, column=1, value=day_kr.get(day, day))
-        ws.cell(row=r, column=2, value=d["count"])
-        ws.cell(row=r, column=3, value=d["views"])
-        ws.cell(row=r, column=4, value=round(d["views"] / cnt))
-        ws.cell(row=r, column=5, value=d["likes"])
-        ws.cell(row=r, column=6, value=round(d["likes"] / cnt, 1))
-        ws.cell(row=r, column=7, value=round(d["engagement"] / cnt, 1))
+        for c, v in enumerate(values, 1):
+            ws.cell(row=r, column=c, value=v)
+        if is_best:
+            _fill_row(ws, r, len(weekday_headers), HIGHLIGHT_FILL)
 
     auto_width(ws)
 
@@ -239,7 +244,7 @@ def sheet_demographics(wb, demographics, followers):
     label_map = {"country": "국가", "city": "도시", "gender": "성별", "age": "연령대"}
     row = 1
 
-    ws.cell(row=row, column=1, value=f"총 팔로워: {followers:,}명").font = Font(bold=True, size=13)
+    ws.cell(row=row, column=1, value=f"총 팔로워: {followers:,}명" if followers else "총 팔로워: -").font = Font(bold=True, size=13)
     row += 2
 
     for key in ["country", "city", "gender", "age"]:
@@ -304,7 +309,7 @@ def _build_growth_strategies(active, type_stats, viral_posts, demographics, tota
         viral_types = Counter(p.get("media_type") for p in viral_posts)
         top_type, top_n = viral_types.most_common(1)[0]
         strategies.append(
-            f"바이럴 패턴 반복 — 1만+ 조회 {len(viral_posts)}개 중 최빈 타입 {top_type}({top_n}건). "
+            f"바이럴 패턴 반복 — 상위 조회 바이럴 {len(viral_posts)}개 중 최빈 타입 {top_type}({top_n}건). "
             "해당 포맷·주제 패턴 재사용"
         )
 
@@ -372,15 +377,16 @@ def sheet_insights_report(wb, posts, user_insights, followers, username="", demo
         eng = ins.get("likes", 0) + ins.get("replies", 0) + ins.get("reposts", 0) + ins.get("quotes", 0)
         type_stats[mt]["engagement"] += eng
 
-    viral_posts = [p for p in active if (p.get("insights") or {}).get("views", 0) >= 10000]
-    high_engage = [p for p in active if (p.get("insights") or {}).get("views", 0) >= 500]
+    viral_min = _viral_threshold([(p, _post_metrics(p)) for p in active])
+    viral_posts = [p for p in active if (p.get("insights") or {}).get("views", 0) >= viral_min]
+    high_engage = [p for p in active if (p.get("insights") or {}).get("views", 0) >= DEAD_VIEWS]
     high_engage_sorted = sorted(high_engage,
         key=lambda p: ((p.get("insights") or {}).get("likes", 0) + (p.get("insights") or {}).get("replies", 0)) / max((p.get("insights") or {}).get("views", 1), 1),
         reverse=True)
 
     row = 1
     ws.cell(row=row, column=1, value=f"@{username} 성장 인사이트 리포트").font = Font(bold=True, size=14)
-    ws.cell(row=row + 1, column=1, value=f"분석일: {datetime.now(JST).strftime('%Y-%m-%d')} / 팔로워: {followers:,}명 / 게시물: {len(active)}개 (리포스트 제외)")
+    ws.cell(row=row + 1, column=1, value=f"분석일: {datetime.now(JST).strftime('%Y-%m-%d')} / 팔로워: {f'{followers:,}명' if followers else '-'} / 게시물: {len(active)}개 (리포스트 제외)")
     row += 3
 
     ws.cell(row=row, column=1, value="1. 핵심 지표").font = Font(bold=True, size=12)
@@ -394,8 +400,8 @@ def sheet_insights_report(wb, posts, user_insights, followers, username="", demo
         ["평균 조회수/게시물", f"{total_views // max(len(active), 1):,}"],
         ["평균 좋아요/게시물", f"{total_likes / max(len(active), 1):.1f}"],
         ["전체 인게이지먼트율", f"{eng_rate:.2f}%"],
-        ["바이럴 게시물 (1만+조회)", f"{len(viral_posts)}개 ({len(viral_posts)/max(len(active), 1)*100:.1f}%)"],
-        ["30일 조회수", f"{user_insights.get('30d_views', 0):,}"],
+        [f"바이럴 게시물 ({viral_min:,}+조회)", f"{len(viral_posts)}개 ({len(viral_posts)/max(len(active), 1)*100:.1f}%)"],
+        ["30일 조회수", f"{user_insights['30d_views']:,}" if user_insights.get("30d_views") else "-"],
     ]
     for label, val in kpi:
         ws.cell(row=row, column=1, value=label)
@@ -442,7 +448,7 @@ def sheet_insights_report(wb, posts, user_insights, followers, username="", demo
         row += 1
     row += 2
 
-    ws.cell(row=row, column=1, value="4. 바이럴 게시물 패턴 분석 (1만+ 조회)").font = Font(bold=True, size=12)
+    ws.cell(row=row, column=1, value=f"4. 바이럴 게시물 패턴 분석 ({viral_min:,}+ 조회)").font = Font(bold=True, size=12)
     row += 1
     if viral_posts:
         viral_types = Counter(p.get("media_type") for p in viral_posts)
@@ -526,6 +532,19 @@ def _median(values):
     return (sorted_values[mid - 1] + sorted_values[mid]) / 2
 
 
+def _percentile(sorted_values, q):
+    # 최근접 순위(nearest-rank). numpy 미사용, 오름차순 리스트 전제
+    if not sorted_values:
+        return 0
+    return sorted_values[min(len(sorted_values) - 1, int(len(sorted_values) * q))]
+
+
+def _viral_threshold(annotated):
+    # 계정이 커지면 기준도 같이 올라가되, 과거 기준선 10000 아래로는 내려가지 않음
+    views = sorted(m["views"] for _, m in annotated)
+    return max(_percentile(views, VIRAL_PERCENTILE / 100), 10000)
+
+
 def _set_section_title(ws, row, title, end_col=10):
     ws.cell(row=row, column=1, value=title).font = Font(bold=True, size=13)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_col)
@@ -548,15 +567,16 @@ def sheet_viral_analysis(wb, posts):
     ws = wb.create_sheet("바이럴 심층분석")
     active_posts = _active_posts(posts)
     annotated = [(p, _post_metrics(p)) for p in active_posts]
-    viral = [(p, m) for p, m in annotated if m["views"] >= 10000]
-    normal = [(p, m) for p, m in annotated if m["views"] < 10000]
+    viral_min = _viral_threshold(annotated)
+    viral = [(p, m) for p, m in annotated if m["views"] >= viral_min]
+    normal = [(p, m) for p, m in annotated if m["views"] < viral_min]
     total_views = sum(m["views"] for _, m in annotated)
     overall_viral_ratio = (len(viral) / len(annotated) * 100) if annotated else 0
     day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     day_kr = {"Monday": "월", "Tuesday": "화", "Wednesday": "수", "Thursday": "목", "Friday": "금", "Saturday": "토", "Sunday": "일"}
     row = 1
 
-    row = _set_section_title(ws, row, "1. 바이럴 게시물 목록")
+    row = _set_section_title(ws, row, f"1. 바이럴 게시물 목록 ({viral_min:,}+ 조회)")
     headers = ["순위", "작성일", "미디어타입", "내용(80자)", "조회수", "좋아요", "답글", "리포스트", "좋아요율(%)", "링크"]
     row = _set_headers(ws, row, headers)
     for i, (post, m) in enumerate(sorted(viral, key=lambda x: x[1]["views"], reverse=True), 1):
@@ -581,7 +601,8 @@ def sheet_viral_analysis(wb, posts):
     row = _set_section_title(ws, row, "2. 바이럴 vs 일반 비교", end_col=8)
     headers = ["구분", "게시물수", "평균조회", "평균좋아요", "평균답글", "평균리포스트", "평균좋아요율(%)", "전체조회비중(%)"]
     row = _set_headers(ws, row, headers)
-    compare_groups = [("바이럴(1만+)", viral), ("일반(<1만)", normal)]
+    viral_label = f"바이럴({viral_min:,}+)"
+    compare_groups = [(viral_label, viral), (f"일반(<{viral_min:,})", normal)]
     for label, group in compare_groups:
         views_sum = sum(m["views"] for _, m in group)
         likes = [m["likes"] for _, m in group]
@@ -598,7 +619,7 @@ def sheet_viral_analysis(wb, posts):
             round(_avg(like_rates), 2),
             round((views_sum / total_views * 100), 2) if total_views > 0 else 0,
         ])
-        if label == "바이럴(1만+)":
+        if label == viral_label:
             _fill_row(ws, row, len(headers), HIGHLIGHT_FILL)
         row += 1
     row += 1
@@ -652,11 +673,58 @@ def sheet_viral_analysis(wb, posts):
         if mt not in type_stats:
             type_stats[mt] = {"viral": 0, "total": 0}
         type_stats[mt]["total"] += 1
-        if m["views"] >= 10000:
+        if m["views"] >= viral_min:
             type_stats[mt]["viral"] += 1
     for media_type, stats in sorted(type_stats.items(), key=lambda x: ((x[1]["viral"] / x[1]["total"]) if x[1]["total"] else 0, x[1]["total"]), reverse=True):
         ratio = (stats["viral"] / stats["total"] * 100) if stats["total"] else 0
         ws.append([media_type, stats["viral"], stats["total"], round(ratio, 2)])
+        row += 1
+    row += 1
+
+    row = _set_section_title(ws, row, "6. 조회수 집중도", end_col=2)
+    headers = ["지표", "값"]
+    row = _set_headers(ws, row, headers)
+    desc_views = sorted((m["views"] for _, m in annotated), reverse=True)
+    if not desc_views:
+        ws.append(["데이터 없음", 0])
+        row += 1
+    else:
+        n = len(desc_views)
+        asc_views = desc_views[::-1]
+        mean_v = _avg(desc_views)
+        median_v = _median(desc_views)
+        shares = []
+        for q in (0.01, 0.05, 0.10):
+            k = max(1, int(n * q))
+            shares.append((sum(desc_views[:k]) / total_views * 100) if total_views else 0)
+        top_one = (desc_views[0] / total_views * 100) if total_views else 0
+        mean_ex_top = _avg(desc_views[1:])
+        stats_rows = [
+            ("원본게시물수", n),
+            ("평균조회", round(mean_v)),
+            ("중앙값조회", round(median_v)),
+            ("평균÷중앙값 배수", round(mean_v / median_v, 2) if median_v else 0),
+            ("P50", round(median_v)),
+            ("P75", _percentile(asc_views, 0.75)),
+            ("P90", _percentile(asc_views, 0.90)),
+            ("P99", _percentile(asc_views, 0.99)),
+            ("바이럴기준(적용값)", viral_min),
+            ("상위1% 조회비중(%)", round(shares[0], 2)),
+            ("상위5% 조회비중(%)", round(shares[1], 2)),
+            ("상위10% 조회비중(%)", round(shares[2], 2)),
+            ("최다조회 1건 비중(%)", round(top_one, 2)),
+            ("1위 제외 평균", round(mean_ex_top)),
+        ]
+        for label, value in stats_rows:
+            ws.append([label, value])
+            row += 1
+        ws.append([
+            "해석",
+            f"상위 1%({max(1, int(n * 0.01))}개)가 전체 조회의 {shares[0]:.1f}%, 최다 1건만으로 {top_one:.1f}%를 차지합니다. "
+            f"평균 {round(mean_v):,}은 중앙값 {round(median_v):,}의 {(mean_v / median_v):.1f}배이며, 1위 게시물을 빼면 평균이 {round(mean_ex_top):,}로 내려갑니다. "
+            "다른 시트의 '평균' 지표는 소수 이상치가 만든 값이므로 중앙값과 함께 해석하세요."
+            if median_v else "중앙값이 0이라 배수 비교가 불가합니다. 조회수 데이터가 충분한지 확인하세요.",
+        ])
         row += 1
 
     ws.freeze_panes = "A3"
@@ -666,7 +734,7 @@ def sheet_viral_analysis(wb, posts):
 def sheet_like_rate_analysis(wb, posts):
     ws = wb.create_sheet("좋아요율 심층분석")
     active_posts = _active_posts(posts)
-    qualified = [(p, _post_metrics(p)) for p in active_posts if (p.get("insights") or {}).get("views", 0) >= 500]
+    qualified = [(p, _post_metrics(p)) for p in active_posts if (p.get("insights") or {}).get("views", 0) >= DEAD_VIEWS]
     row = 1
 
     row = _set_section_title(ws, row, "1. 좋아요율 분포", end_col=5)
@@ -763,56 +831,104 @@ def sheet_content_optimization(wb, posts):
     annotated = [(p, _post_metrics(p)) for p in active_posts]
     row = 1
 
-    row = _set_section_title(ws, row, "1. 텍스트 길이별 성과", end_col=7)
-    headers = ["구간", "게시물수", "평균조회", "평균좋아요", "평균답글", "평균좋아요율(%)", "판정"]
+    row = _set_section_title(ws, row, "1. 글자수 구간별 성과 (조회수 vs 인게이지먼트율)", end_col=8)
+    dead_cutoff = DEAD_VIEWS
+    all_views = sum(m["views"] for _, m in annotated)
+    type_counts = {}
+    for _, m in annotated:
+        type_counts[m["media_type"] or "UNKNOWN"] = type_counts.get(m["media_type"] or "UNKNOWN", 0) + 1
+    type_note = ", ".join(f"{k} {v}건" for k, v in sorted(type_counts.items(), key=lambda x: -x[1]))
+    ws.cell(row=row, column=1, value=f"미디어타입 전체 포함: {type_note or '데이터 없음'} / 데드율 = 조회 {round(dead_cutoff)} 미만 비율")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+    ws.cell(row=row, column=1).alignment = Alignment(wrap_text=True)
+    row += 1
+    headers = ["글자수구간", "게시수", "중앙값조회", "평균조회", "중앙값ER(%)", "데드율(%)", "총조회비중(%)", "판정"]
     row = _set_headers(ws, row, headers)
-    text_posts = [(p, m) for p, m in annotated if m["media_type"] == "TEXT_POST"]
     length_buckets = [
-        ("~50자", 0, 50),
-        ("51-100자", 51, 100),
-        ("101-200자", 101, 200),
-        ("201-300자", 201, 300),
-        ("300자+", 301, None),
+        ("0-50자", 0, 50),
+        ("50-100자", 50, 100),
+        ("100-150자", 100, 150),
+        ("150-200자", 150, 200),
+        ("200-300자", 200, 300),
+        ("300-400자", 300, 400),
+        ("400-500자", 400, 500),
+        ("500자+", 500, None),
     ]
     bucket_rows = []
     for label, low, high in length_buckets:
         bucket = []
-        for post, m in text_posts:
+        for post, m in annotated:
             text_len = len((post.get("text") or "").replace("\n", " ").strip())
             if high is None:
                 matched = text_len >= low
             else:
-                matched = low <= text_len <= high
+                matched = low <= text_len < high
             if matched:
-                bucket.append((post, m))
+                bucket.append(m)
+        # ER은 shares 포함 — _post_metrics['engagement']는 shares를 제외하므로 여기서 직접 계산
+        ers = [
+            ((m["likes"] + m["replies"] + m["reposts"] + m["quotes"] + m["shares"]) / m["views"] * 100)
+            if m["views"] > 0 else 0
+            for m in bucket
+        ]
+        bucket_views = [m["views"] for m in bucket]
         bucket_rows.append({
             "label": label,
             "count": len(bucket),
-            "avg_views": round(_avg([m["views"] for _, m in bucket])) if bucket else 0,
-            "avg_likes": round(_avg([m["likes"] for _, m in bucket]), 1) if bucket else 0,
-            "avg_replies": round(_avg([m["replies"] for _, m in bucket]), 1) if bucket else 0,
-            "avg_like_rate": round(_avg([m["like_rate"] for _, m in bucket]), 2) if bucket else 0,
+            "median_views": round(_median(bucket_views)),
+            "avg_views": round(_avg(bucket_views)),
+            "median_er": round(_median(ers), 2),
+            "dead_rate": round(len([v for v in bucket_views if v < dead_cutoff]) / len(bucket) * 100, 2) if bucket else 0,
+            "view_share": round(sum(bucket_views) / all_views * 100, 2) if all_views else 0,
         })
-    non_zero_rows = [r for r in bucket_rows if r["count"] > 0]
-    best_label = max(non_zero_rows, key=lambda x: x["avg_like_rate"])["label"] if non_zero_rows else ""
-    worst_label = min(non_zero_rows, key=lambda x: x["avg_like_rate"])["label"] if non_zero_rows else ""
-    for bucket in bucket_rows:
-        if bucket["label"] == best_label:
-            verdict = "🏆 최적"
-        elif bucket["label"] == worst_label and bucket["label"] != best_label:
-            verdict = "⚠️ 데드존"
-        else:
-            verdict = "✅ 양호"
-        ws.append([
-            bucket["label"],
-            bucket["count"],
-            bucket["avg_views"],
-            bucket["avg_likes"],
-            bucket["avg_replies"],
-            bucket["avg_like_rate"],
-            verdict,
-        ])
+    eligible = [r for r in bucket_rows if r["count"] >= 30]
+    top_labels = {r["label"] for r in sorted(eligible, key=lambda x: -x["median_views"])[:2]}
+    best_median = max((r["median_views"] for r in eligible), default=0)
+    if not [r for r in bucket_rows if r["count"] > 0]:
+        ws.append(["데이터 없음", 0, 0, 0, 0, 0, 0, "-"])
         row += 1
+    else:
+        for bucket in bucket_rows:
+            if bucket["count"] < 30:
+                verdict = "표본부족"
+            elif bucket["label"] in top_labels:
+                verdict = "🏆조회최적"
+            elif bucket["median_views"] < best_median * 0.6:
+                verdict = "⚠️조회데드존"
+            else:
+                verdict = "✅양호"
+            ws.append([
+                bucket["label"],
+                bucket["count"],
+                bucket["median_views"],
+                bucket["avg_views"],
+                bucket["median_er"],
+                bucket["dead_rate"],
+                bucket["view_share"],
+                verdict,
+            ])
+            if verdict == "🏆조회최적":
+                _fill_row(ws, row, len(headers), HIGHLIGHT_FILL)
+            row += 1
+        # 상충 캡션: ER 최고 구간과 조회 최고 구간의 실제 수치로 생성
+        if eligible:
+            er_best = max(eligible, key=lambda x: x["median_er"])
+            view_best = max(eligible, key=lambda x: x["median_views"])
+            if er_best["label"] != view_best["label"]:
+                caption = (
+                    f"글이 길수록 인게이지먼트율은 올라가지만 조회수는 급감합니다 "
+                    f"({er_best['label']}: ER {er_best['median_er']}% / 조회 {er_best['median_views']}, "
+                    f"{view_best['label']}: ER {view_best['median_er']}% / 조회 {view_best['median_views']}) "
+                    f"— 조회 격차 {round(view_best['median_views'] / er_best['median_views'], 1)}배"
+                    if er_best["median_views"] else ""
+                )
+            else:
+                caption = f"{view_best['label']} 구간이 조회수와 인게이지먼트율 모두 최고입니다 (ER {view_best['median_er']}% / 조회 {view_best['median_views']})"
+            if caption:
+                ws.cell(row=row, column=1, value=caption)
+                ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+                ws.cell(row=row, column=1).alignment = Alignment(wrap_text=True)
+                row += 1
     row += 1
 
     row = _set_section_title(ws, row, "2. 미디어타입별 상세 비교", end_col=9)
@@ -902,6 +1018,48 @@ def sheet_content_optimization(wb, posts):
             value = ws.cell(row=r, column=c).value or 0
             if value >= percentile_80 and value > 0:
                 ws.cell(row=r, column=c).fill = HIGHLIGHT_FILL
+    row += 1
+
+    row = _set_section_title(ws, row, "5. 토픽 태그별 성과", end_col=5)
+    headers = ["토픽", "게시수", "중앙값조회", "중앙값ER(%)", "데드율(<500조회,%)"]
+    row = _set_headers(ws, row, headers)
+    # topic_tag는 토픽 없는 게시물에서 API 응답 키 자체가 빠진다
+    topic_groups = {}
+    for post, m in annotated:
+        topic_groups.setdefault(post.get("topic_tag") or "", []).append(m)
+    untagged = topic_groups.pop("", [])
+
+    def topic_stats(label, items):
+        views = [m["views"] for m in items]
+        ers = [
+            ((m["likes"] + m["replies"] + m["reposts"] + m["quotes"] + m["shares"]) / m["views"] * 100)
+            if m["views"] > 0 else 0
+            for m in items
+        ]
+        return [
+            label,
+            len(items),
+            round(_median(views)),
+            round(_median(ers), 2),
+            round(len([v for v in views if v < 500]) / len(items) * 100, 2),
+        ]
+
+    if not topic_groups:
+        ws.append(["데이터 없음 (topic_tag 미수집 — analyze.py 재실행 필요)", "-", "-", "-", "-"])
+        row += 1
+    else:
+        small = [m for items in topic_groups.values() if len(items) < 5 for m in items]
+        topic_rows = sorted(
+            (topic_stats(label, items) for label, items in topic_groups.items() if len(items) >= 5),
+            key=lambda r: -r[2],
+        )
+        if small:
+            topic_rows.append(topic_stats("기타(n<5)", small))
+        if untagged:
+            topic_rows.append(topic_stats("토픽 없음", untagged))
+        for topic_row in topic_rows:
+            ws.append(topic_row)
+            row += 1
 
     ws.freeze_panes = "A3"
     auto_width(ws)
@@ -1018,6 +1176,206 @@ def sheet_monthly_trend(wb, posts):
     auto_width(ws)
 
 
+def sheet_daily_views(wb, user_insights):
+    ws = wb.create_sheet("일별 조회수 추이")
+    series = []
+    for d in user_insights.get("daily_views") or []:
+        if not isinstance(d, dict):
+            continue
+        date = d.get("date")
+        value = d.get("value", 0)
+        if date and isinstance(value, (int, float)):
+            series.append((str(date), int(value)))
+    series.sort(key=lambda x: x[0])
+    row = 1
+
+    if not series:
+        row = _set_section_title(ws, row, "일별 조회수 추이", end_col=4)
+        ws.append(["데이터 없음 (일별 시계열 미수집)"])
+        auto_width(ws)
+        return
+
+    values = [v for _, v in series]
+    # 앞쪽 6일은 누적 구간 평균 (7일치가 아직 없음)
+    moving_avg = [_avg(values[max(0, i - 6):i + 1]) for i in range(len(values))]
+
+    row = _set_section_title(ws, row, "1. 최근 90일 일별 조회수", end_col=4)
+    headers = ["날짜", "조회수", "7일이동평균", "전주동요일대비(%)"]
+    row = _set_headers(ws, row, headers)
+    start = max(0, len(series) - 90)
+    mean_90 = _avg(values[start:])
+    prev_ma = None
+    for i in range(start, len(series)):
+        date, value = series[i]
+        wow = "-"
+        if i >= 7 and values[i - 7] > 0:
+            wow = round((value - values[i - 7]) / values[i - 7] * 100, 2)
+        ws.append([date, value, round(moving_avg[i]), wow])
+        if prev_ma is not None and (prev_ma < mean_90 <= moving_avg[i] or prev_ma > mean_90 >= moving_avg[i]):
+            _fill_row(ws, row, len(headers), HIGHLIGHT_FILL)
+        prev_ma = moving_avg[i]
+        row += 1
+    row += 1
+
+    row = _set_section_title(ws, row, "2. 월별 실제 노출 조회수 (노출일 기준)", end_col=5)
+    headers = ["월", "일수", "총조회", "일평균조회", "전월대비(%)"]
+    row = _set_headers(ws, row, headers)
+    monthly = {}
+    for date, value in series:
+        monthly.setdefault(date[:7], []).append(value)
+    prev_total = None
+    for month in sorted(monthly):
+        month_values = monthly[month]
+        total = sum(month_values)
+        # 부분 달(수집 시작월·진행중인 달)을 완전한 달과 비교하면 -90%대 가짜 급락이 나온다
+        partial = len(month_values) < monthrange(int(month[:4]), int(month[5:7]))[1]
+        mom = "-" if partial or prev_total in (None, 0) else round((total - prev_total) / prev_total * 100, 2)
+        label = f"{month} (부분)" if partial else month
+        ws.append([label, len(month_values), total, round(_avg(month_values)), mom])
+        prev_total = None if partial else total
+        row += 1
+    row += 1
+
+    row = _set_section_title(ws, row, "3. 요일별 노출량", end_col=4)
+    headers = ["요일", "관측주수", "중앙값일조회", "평균일조회"]
+    row = _set_headers(ws, row, headers)
+    day_kr = {"Monday": "월", "Tuesday": "화", "Wednesday": "수", "Thursday": "목", "Friday": "금", "Saturday": "토", "Sunday": "일"}
+    by_day = {name: [] for name in _WEEKDAY_NAMES}
+    for date, value in series:
+        try:
+            by_day[_weekday_en(datetime.strptime(date, "%Y-%m-%d"))].append(value)
+        except ValueError:
+            continue
+    medians = {name: _median(by_day[name]) for name in _WEEKDAY_NAMES}
+    top2 = [name for name, _ in sorted(medians.items(), key=lambda x: x[1], reverse=True)[:2]]
+    for name in _WEEKDAY_NAMES:
+        day_values = by_day[name]
+        ws.append([day_kr[name], len(day_values), round(medians[name]), round(_avg(day_values))])
+        if day_values and name in top2:
+            _fill_row(ws, row, len(headers), HIGHLIGHT_FILL)
+        row += 1
+    row += 1
+
+    row = _set_section_title(ws, row, "4. 요약", end_col=2)
+    row = _set_headers(ws, row, ["지표", "값"])
+    last30 = sum(values[-30:])
+    prev30 = sum(values[-60:-30])
+    best = max(series, key=lambda x: x[1])
+    worst = min(series, key=lambda x: x[1])
+    for summary_row in [
+        [f"{len(series)}일 총조회", f"{sum(values):,}"],
+        ["최근 30일", f"{last30:,}"],
+        ["직전 30일", f"{prev30:,}"],
+        ["증감(%)", "-" if prev30 == 0 else round((last30 - prev30) / prev30 * 100, 2)],
+        ["최고일", f"{best[0]} ({best[1]:,})"],
+        ["최저일", f"{worst[0]} ({worst[1]:,})"],
+    ]:
+        ws.append(summary_row)
+        row += 1
+    row += 1
+    ws.cell(row=row, column=1, value="API 기준 일 경계(UTC-07:00), 게시물 시각(JST)과 다름")
+
+    ws.freeze_panes = "A3"
+    auto_width(ws)
+
+
+def sheet_longitudinal(wb, snapshots):
+    ws = wb.create_sheet("스냅샷 성장추이")
+    row = 1
+
+    headers = ["스냅샷일시", "전체게시물", "원본게시물", "팔로워", "30일조회", "30일좋아요", "비고"]
+    row = _set_section_title(ws, row, "1. 스냅샷 이력", end_col=len(headers))
+    row = _set_headers(ws, row, headers)
+    for s in snapshots:
+        ws.append([
+            s["label"],
+            s["posts_total"],
+            s["active"],
+            s["followers"] if s["followers"] > 0 else "-",
+            s["views_30d"],
+            s["likes_30d"] if s["likes_30d"] > 0 else "-",
+            " / ".join(s["flags"]) if s["flags"] else "정상",
+        ])
+        row += 1
+    row += 1
+
+    headers = ["구간", "일수", "원본게시물증가", "팔로워증가", "일평균팔로워", "원본1건당팔로워", "30일조회증감(%)"]
+    row = _set_section_title(ws, row, "2. 구간별 성장률 (결측 스냅샷 구간은 팔로워 계산 제외)", end_col=len(headers))
+    row = _set_headers(ws, row, headers)
+    for prev, cur in zip(snapshots, snapshots[1:]):
+        days = round((cur["dt"] - prev["dt"]).total_seconds() / 86400) if prev["dt"] and cur["dt"] else 0
+        if days <= 0:
+            continue  # 같은 시각 재수집본끼리의 0일 구간은 성장률이 아니다
+        active_delta = cur["active"] - prev["active"]
+        # 결측(followers<=0) 스냅샷을 그대로 빼면 가짜 급감이 나오므로 계산 자체를 안 한다
+        if prev["followers"] > 0 and cur["followers"] > 0:
+            follower_delta = cur["followers"] - prev["followers"]
+            per_day = round(follower_delta / days, 2) if days > 0 else "-"
+            per_post = round(follower_delta / active_delta, 2) if active_delta > 0 else "-"
+        else:
+            follower_delta = per_day = per_post = "-"
+        view_change = "-"
+        if prev["views_30d"] > 0:
+            view_change = round((cur["views_30d"] - prev["views_30d"]) / prev["views_30d"] * 100, 2)
+        ws.append([
+            f"{prev['label']} → {cur['label']}",
+            days, active_delta, follower_delta, per_day, per_post, view_change,
+        ])
+        if isinstance(follower_delta, int) and follower_delta > 0:
+            _fill_row(ws, row, len(headers), HIGHLIGHT_FILL)
+        row += 1
+    row += 1
+
+    headers = ["게시일후경과", "대상게시물수", "중앙값조회증가", "증가율(%)"]
+    row = _set_section_title(ws, row, "3. 게시물 조회수 누적 곡선 (id 조인, n<20 구간은 '-')", end_col=len(headers))
+    row = _set_headers(ws, row, headers)
+    base = next((s for s in snapshots if s["by_id"]), None)
+    latest = next((s for s in reversed(snapshots) if s["by_id"] and s is not base), None)
+    buckets = [("0-7일", 0, 7), ("7-14일", 7, 14), ("14-30일", 14, 30),
+               ("30-60일", 30, 60), ("60-90일", 60, 90), ("90일+", 90, float("inf"))]
+    grouped = {label: [] for label, _, _ in buckets}
+    if base and latest and base["dt"]:
+        for post_id, (old_views, post_dt) in base["by_id"].items():
+            new_entry = latest["by_id"].get(post_id)
+            if not new_entry or not post_dt:
+                continue
+            age = (base["dt"] - post_dt).total_seconds() / 86400
+            if age < 0:
+                continue
+            for label, low, high in buckets:
+                if low <= age < high:
+                    grouped[label].append((new_entry[0] - old_views, old_views))
+                    break
+    if any(grouped.values()):
+        for label, _, _ in buckets:
+            items = grouped[label]
+            if len(items) >= 20:
+                gain = round(_median([d for d, _ in items]))
+                rate = round(_median([d / b * 100 for d, b in items if b > 0]), 2)
+            else:
+                gain = rate = "-"
+            ws.append([label, len(items), gain, rate])
+            row += 1
+    else:
+        ws.append(["데이터 없음", 0, "-", "-"])
+        row += 1
+    row += 1
+
+    headers = ["스냅샷", "리포스트수", "비중(%)"]
+    row = _set_section_title(ws, row, "4. 리포스트 비중 추이 (REPOST_FACADE)", end_col=len(headers))
+    row = _set_headers(ws, row, headers)
+    for s in snapshots:
+        ws.append([
+            s["label"],
+            s["reposts"],
+            round(s["reposts"] / s["posts_total"] * 100, 2) if s["posts_total"] else 0,
+        ])
+        row += 1
+
+    ws.freeze_panes = "A3"
+    auto_width(ws)
+
+
 def sheet_growth_strategy(wb, posts, demographics, followers):
     ws = wb.create_sheet("10만 성장전략")
     active_posts = _active_posts(posts)
@@ -1025,7 +1383,8 @@ def sheet_growth_strategy(wb, posts, demographics, followers):
     total_views = sum(m["views"] for _, m in annotated)
     total_engagement = sum(m["engagement"] for _, m in annotated)
     engagement_rate = (total_engagement / total_views * 100) if total_views else 0
-    viral_ratio = (sum(1 for _, m in annotated if m["views"] >= 10000) / len(annotated) * 100) if annotated else 0
+    viral_min = _viral_threshold(annotated)
+    viral_ratio = (sum(1 for _, m in annotated if m["views"] >= viral_min) / len(annotated) * 100) if annotated else 0
     carousel_ratio = (sum(1 for _, m in annotated if m["media_type"] == "CAROUSEL_ALBUM") / len(annotated) * 100) if annotated else 0
     reply_post_ratio = (sum(1 for _, m in annotated if m["replies"] > 0) / len(annotated) * 100) if annotated else 0
     avg_like_rate = _avg([m["like_rate"] for _, m in annotated]) if annotated else 0
@@ -1081,9 +1440,9 @@ def sheet_growth_strategy(wb, posts, demographics, followers):
     headers = ["지표", "현재값", "10만계정기준", "판정"]
     row = _set_headers(ws, row, headers)
     diagnosis_rows = [
-        ["팔로워", f"{followers:,}", "100,000", f"🔴 {followers / 100000 * 100:.1f}%"],
+        ["팔로워", f"{followers:,}" if followers else "-", "100,000", f"🔴 {followers / 100000 * 100:.1f}%" if followers else "-"],
         ["인게이지먼트율", f"{engagement_rate:.2f}%", "2-5%", judge_range(engagement_rate, 2, 5)],
-        ["바이럴비율(1만+조회)", f"{viral_ratio:.2f}%", "5-10%", judge_range(viral_ratio, 5, 10)],
+        [f"바이럴비율({viral_min:,}+조회)", f"{viral_ratio:.2f}%", "5-10%", judge_range(viral_ratio, 5, 10)],
         ["캐러셀비중", f"{carousel_ratio:.2f}%", "10-20%", judge_range(carousel_ratio, 10, 20)],
         ["답글있는게시물", f"{reply_post_ratio:.2f}%", "70%+", judge_range(reply_post_ratio, 70)],
         ["평균좋아요율", f"{avg_like_rate:.2f}%", "3-5%", judge_range(avg_like_rate, 3, 5)],
@@ -1226,6 +1585,46 @@ def resolve_input_path(input_arg: str = None) -> str:
     return json_files[-1]
 
 
+def load_snapshots():
+    """output/analysis_*.json 전체를 오래된 순으로 로드 (cross-snapshot 추이 전용)."""
+    import glob as _glob
+
+    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    snapshots = []
+    for path in sorted(_glob.glob(os.path.join(output_dir, "analysis_*.json"))):
+        try:
+            data = load_data(path)
+        except (OSError, ValueError):
+            continue  # 수집 중이거나 깨진 파일은 건너뜀
+        posts = data.get("posts") or []
+        user_insights = data.get("user_insights") or {}
+        dt = parse_ts(data.get("analyzed_at"))
+        followers = user_insights.get("followers_count") or 0
+        likes_30d = user_insights.get("30d_likes") or 0
+        flags = []
+        if followers <= 0:
+            flags.append("팔로워 데이터 결측")
+        if likes_30d <= 0:
+            flags.append("30일좋아요 데이터 결측")
+        snapshots.append({
+            "label": dt.strftime("%Y-%m-%d %H:%M") if dt else os.path.basename(path),
+            "dt": dt,
+            "posts_total": len(posts),
+            "reposts": sum(1 for p in posts if p.get("media_type") == "REPOST_FACADE"),
+            "active": len(_active_posts(posts)),
+            "followers": followers,
+            "views_30d": user_insights.get("30d_views") or 0,
+            "likes_30d": likes_30d,
+            "flags": flags,
+            # id → (조회수, 게시일). 리포스트는 insights가 항상 비어 있어 제외
+            "by_id": {
+                p["id"]: ((p.get("insights") or {}).get("views", 0), parse_ts(p.get("timestamp")))
+                for p in _active_posts(posts) if p.get("id")
+            },
+        })
+    return snapshots
+
+
 def build_workbook(data: dict):
     posts = data.get("posts", [])
     user_insights = data.get("user_insights", {})
@@ -1245,6 +1644,10 @@ def build_workbook(data: dict):
     sheet_like_rate_analysis(wb, posts)
     sheet_content_optimization(wb, posts)
     sheet_monthly_trend(wb, posts)
+    sheet_daily_views(wb, user_insights)
+    snapshots = load_snapshots()
+    if len(snapshots) >= 2:
+        sheet_longitudinal(wb, snapshots)
     sheet_growth_strategy(wb, posts, demographics, followers)
     return wb
 
@@ -1266,7 +1669,8 @@ def main(argv=None):
     wb.save(output_path)
     print(f"Excel 저장 완료: {output_path}")
     print(f"시트: {wb.sheetnames}")
-    print(f"게시물: {len(data.get('posts', []))}개 / 팔로워: {data.get('user_insights', {}).get('followers_count', 0):,}")
+    followers_count = data.get("user_insights", {}).get("followers_count")
+    print(f"게시물: {len(data.get('posts', []))}개 / 팔로워: {f'{followers_count:,}' if followers_count else '-'}")
 
 
 if __name__ == "__main__":

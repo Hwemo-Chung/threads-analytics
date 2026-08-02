@@ -170,7 +170,8 @@ def fetch_profile() -> dict:
 def fetch_all_posts(max_posts: int = None) -> list:
     print("\n2. 게시물 전체 조회 중...")
     all_posts = []
-    fields = "id,media_type,text,timestamp,permalink,like_count,replies_count"
+    # topic_tag는 토픽 없는 게시물에서 키 자체가 빠져서 옴 (누락 = 토픽 없음)
+    fields = "id,media_type,text,timestamp,permalink,like_count,replies_count,topic_tag"
 
     params = {"fields": fields, "limit": 100}
     page = 1
@@ -334,7 +335,8 @@ def fetch_post_insights(
     return enriched
 
 
-def _insight_total(item: dict) -> int:
+def _insight_total(item: dict):
+    """값이 없으면 None. 진짜 0과 '데이터 없음'을 구분해야 결측 스냅샷이 안 섞인다."""
     total_value = item.get("total_value")
     if isinstance(total_value, dict):
         value = total_value.get("value")
@@ -342,9 +344,9 @@ def _insight_total(item: dict) -> int:
             return int(value)
 
     values = item.get("values", [])
-    if isinstance(values, list):
+    if isinstance(values, list) and values:
         return sum(v.get("value", 0) for v in values if isinstance(v, dict))
-    return 0
+    return None
 
 
 def fetch_user_insights() -> dict:
@@ -357,7 +359,12 @@ def fetch_user_insights() -> dict:
     )
     for item in followers_data.get("data", []):
         if item["name"] == "followers_count":
-            result["followers_count"] = _insight_total(item)
+            total = _insight_total(item)
+            # 0/None을 그대로 저장하면 스냅샷 간 비교에서 가짜 급감이 된다
+            if total is not None and total > 0:
+                result["followers_count"] = total
+    if "followers_count" not in result:
+        print("  [WARN] 팔로워 수를 가져오지 못했습니다. 이번 스냅샷에는 기록하지 않습니다.")
 
     now = datetime.now(JST)
     since = int((now - timedelta(days=30)).timestamp())
@@ -373,15 +380,46 @@ def fetch_user_insights() -> dict:
     )
     for item in period_data.get("data", []):
         name = item["name"]
-        result[f"30d_{name}"] = _insight_total(item)
+        total = _insight_total(item)
+        if total is None:
+            print(f"  [WARN] 30일 {name} 지표가 비어 있습니다. 기록하지 않습니다.")
+            continue
+        result[f"30d_{name}"] = total
+
+    # 일별 조회수 시계열(730일). _insight_total()은 일 버킷을 합쳐버리므로 직접 파싱한다.
+    try:
+        daily_data = api_get(
+            f"{USER_ID}/threads_insights",
+            {
+                "metric": "views",
+                "since": int((now - timedelta(days=729)).timestamp()),
+                "until": until,
+            },
+        )
+        for item in daily_data.get("data", []):
+            if item.get("name") != "views":
+                continue
+            daily = [
+                {"date": v["end_time"][:10], "value": int(v.get("value", 0) or 0)}
+                for v in item.get("values", [])
+                if isinstance(v, dict) and v.get("end_time")
+            ]
+            if daily:
+                result["daily_views"] = daily
+    except Exception as exc:
+        print(f"  [WARN] 일별 조회수 시계열 조회 실패: {exc}")
+
+    def fmt(key):
+        value = result.get(key)
+        return f"{value:,}" if isinstance(value, int) else "-"
 
     rows = [
-        ["팔로워 수", result.get("followers_count", "-")],
-        ["조회수 (30일)", f"{result.get('30d_views', 0):,}"],
-        ["좋아요 (30일)", f"{result.get('30d_likes', 0):,}"],
-        ["답글 (30일)", f"{result.get('30d_replies', 0):,}"],
-        ["리포스트 (30일)", f"{result.get('30d_reposts', 0):,}"],
-        ["인용 (30일)", f"{result.get('30d_quotes', 0):,}"],
+        ["팔로워 수", fmt("followers_count")],
+        ["조회수 (30일)", fmt("30d_views")],
+        ["좋아요 (30일)", fmt("30d_likes")],
+        ["답글 (30일)", fmt("30d_replies")],
+        ["리포스트 (30일)", fmt("30d_reposts")],
+        ["인용 (30일)", fmt("30d_quotes")],
     ]
     print(tabulate(rows, headers=["지표", "값"], tablefmt="simple_outline"))
     return result
@@ -567,7 +605,7 @@ def print_summary(profile: dict, posts: list, user_insights: dict):
 
     rows = [
         ["계정", f"@{profile.get('username', '-')}"],
-        ["팔로워", f"{followers:,}명"],
+        ["팔로워", f"{followers:,}명" if followers else "-"],
         ["총 게시물", f"{total_posts}개"],
         ["총 조회수", f"{total_views:,}"],
         ["총 좋아요", f"{total_likes:,}"],
