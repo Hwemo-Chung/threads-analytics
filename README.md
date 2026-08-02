@@ -7,7 +7,7 @@ Meta Threads API를 활용한 계정 종합 분석 도구. OAuth 인증부터 �
 - **OAuth 2.0 인증** — 로컬 HTTPS 서버로 Threads 토큰 자동 발급
 - **전체 게시물 수집** — 페이지네이션으로 모든 게시물 + 인사이트 병렬 수집
 - **계정 인사이트** — 팔로워 수, 30일 조회수, 인구통계(국가/도시/성별/연령)
-- **Excel 리포트** (10개 시트) — 랭킹, 시간대 분석, 바이럴 분석, 성장 전략 등
+- **Excel 리포트** (12개 시트) — 랭킹, 시간대 분석, 일별 시계열, 바이럴 분석, 성장 전략 등
 - **토큰 갱신** — 60일 장기 토큰 만료 전 갱신
 
 ## 사전 준비
@@ -37,17 +37,23 @@ Meta Threads API를 활용한 계정 종합 분석 도구. OAuth 인증부터 �
 ## 설치
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/threads-analytics.git
+git clone https://github.com/Hwemo-Chung/threads-analytics.git
 cd threads-analytics
-pip install -r requirements.txt
+python3 setup.py
 ```
 
-## 설정
+`setup.py`가 의존성 설치, SSL 인증서 생성, `.env` 작성, 인증까지 한 번에 처리합니다.
+Meta 앱 ID/Secret만 준비해서 붙여넣으면 됩니다. 이미 설정된 값은 건드리지 않으므로 다시 실행해도 안전합니다.
+
+> 수동으로 하시려면 아래 "수동 설정"을 따르세요.
+
+## 수동 설정
 
 ### 1. 환경변수 설정
 
 ```bash
 cp .env.example .env
+pip install -r requirements.txt
 ```
 
 `.env` 파일을 열고 앱 정보 입력:
@@ -122,20 +128,25 @@ python3 export_excel.py -i path/to.json -o path/to/report.xlsx
 
 기본: `output/` 최신 `analysis_*.json` → `output/threads_analysis_YYYYMMDD.xlsx`
 
-**생성되는 시트 (10개):**
+**생성되는 시트 (12개):**
 
 | 시트 | 내용 |
 |---|---|
 | 전체 게시물 | 전체 목록 (날짜/조회/좋아요/인게이지먼트, 필터 가능) |
 | 인사이트 랭킹 | 조회수/인게이지먼트/좋아요율/바이럴 각 TOP 30 |
-| 시간대 분석 | 24시간대별 + 요일별 평균 성과 |
+| 시간대 분석 | 24시간대별 + 요일별 **중앙값**과 데드율(500조회 미만 비율) |
 | 팔로워 인구통계 | 국가/도시/성별/연령대 분포 |
 | 성장 인사이트 | KPI 요약, 미디어타입별 성과, 바이럴 패턴 |
-| 바이럴 심층분석 | 1만+ 조회 전수 목록, 바이럴 vs 일반 비교 |
+| 바이럴 심층분석 | 계정 규모에 맞춘 동적 임계값(P99), 조회 집중도 |
 | 좋아요율 심층분석 | 좋아요율 분포, TOP/WORST 30, 미디어타입별 중앙값 |
-| 콘텐츠 최적화 | 텍스트 길이별 성과, 캐러셀 vs 텍스트 비교 |
+| 콘텐츠 최적화 | 글자수별 조회수 vs 인게이지먼트율 상충, 토픽 태그별 성과 |
 | 월별 트렌드 | 월별 추이(전월대비 증감%), 분기별 요약 |
+| 일별 조회수 추이 | 최대 730일 일별 시계열, 7일 이동평균, 노출일 기준 월별 |
+| 스냅샷 성장추이 | 실행할 때마다 쌓이는 팔로워 이력 (API가 제공하지 않는 데이터) |
 | 10만 성장전략 | 현재 위치 진단, 즉시 실행 TOP 5, 로드맵 |
+
+> **평균이 아니라 중앙값을 봅니다.** 바이럴 게시물 하나가 평균을 끌어올려 시간대 판정을 뒤집기 때문입니다.
+> 실제로 제작자 계정에서는 평균 기준 최고였던 시간대가 중앙값 기준으로는 최악(데드율 70%)이었습니다.
 
 ### 토큰 갱신 (60일마다)
 
@@ -191,10 +202,11 @@ python3 -m unittest discover -s tests -v
 
 ```
 threads-analytics/
+├── setup.py             # 설치 도우미 (의존성·인증서·.env·인증 일괄)
 ├── auth.py              # OAuth 2.0 (HTTPS, state CSRF, TOKEN_EXPIRES_AT)
 ├── analyze.py           # 수집·분석 (재시도, TTL, CLI, 저장함)
 ├── archive.py           # 게시 텍스트 저장함
-├── export_excel.py      # JSON → Excel 10시트 (-i/-o)
+├── export_excel.py      # JSON → Excel 12시트 (-i/-o)
 ├── refresh_token.py     # 장기 토큰 갱신
 ├── tests/               # 단위 테스트 (네트워크 없음)
 ├── requirements.txt
