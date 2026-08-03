@@ -9,6 +9,8 @@ import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
+import i18n
+
 JST = timezone(timedelta(hours=9))
 
 # Locale-independent weekday names (strftime %A is locale-dependent → KeyError on Korean/Japanese systems)
@@ -1081,7 +1083,7 @@ def sheet_monthly_trend(wb, posts):
     row = 1
 
     row = _set_section_title(ws, row, "1. 월별 성과 추이", end_col=10)
-    headers = ["월", "게시물수", "총조회", "평균조회", "총좋아요", "평균좋아요", "총답글", "인게이지먼트율(%)", "전월대비조회증감(%)", "전월대비좋아요증감(%)"]
+    headers = ["연월", "게시물수", "총조회", "평균조회", "총좋아요", "평균좋아요", "총답글", "인게이지먼트율(%)", "전월대비조회증감(%)", "전월대비좋아요증감(%)"]
     row = _set_headers(ws, row, headers)
     prev_views = None
     prev_likes = None
@@ -1218,7 +1220,7 @@ def sheet_daily_views(wb, user_insights):
     row += 1
 
     row = _set_section_title(ws, row, "2. 월별 실제 노출 조회수 (노출일 기준)", end_col=5)
-    headers = ["월", "일수", "총조회", "일평균조회", "전월대비(%)"]
+    headers = ["연월", "일수", "총조회", "일평균조회", "전월대비(%)"]
     row = _set_headers(ws, row, headers)
     monthly = {}
     for date, value in series:
@@ -1563,6 +1565,12 @@ def parse_args(argv=None):
         default=None,
         help="출력 xlsx 경로 (미지정 시 output/threads_analysis_YYYYMMDD.xlsx)",
     )
+    parser.add_argument(
+        "--lang",
+        default=None,
+        choices=i18n.LANGS,
+        help="리포트 언어 (미지정 시 THREADS_LANG, 없으면 ko)",
+    )
     return parser.parse_args(argv)
 
 
@@ -1663,9 +1671,13 @@ def main(argv=None):
         output_dir, f"threads_analysis_{timestamp}.xlsx"
     )
 
+    lang = i18n.resolve_lang(args.lang)
     print(f"입력: {input_path}")
+    if lang != "ko":
+        print(f"언어: {lang}")
     data = load_data(input_path)
     wb = build_workbook(data)
+    i18n.translate_workbook(wb, lang)
     wb.save(output_path)
     print(f"Excel 저장 완료: {output_path}")
     print(f"시트: {wb.sheetnames}")

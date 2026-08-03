@@ -15,6 +15,7 @@ if ROOT not in sys.path:
 import analyze
 import auth
 import export_excel
+import i18n
 
 
 class TestInsightTotal(unittest.TestCase):
@@ -264,3 +265,70 @@ class TestArchive(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestI18n(unittest.TestCase):
+    """번역이 UI만 바꾸고 숫자·게시물 본문은 건드리지 않는지 고정한다."""
+
+    def _data(self):
+        return {
+            "profile": {"username": "testuser"},
+            "posts": [{
+                "id": str(i),
+                "media_type": "TEXT_POST",
+                # 본문에 UI 문자열을 그대로 넣어 최악의 경우를 만든다.
+                "text": "조회수" if i == 0 else f"post body {i} 한국어 본문",
+                "timestamp": f"2026-01-{i % 28 + 1:02d}T10:00:00+0000",
+                "permalink": "https://example.com",
+                "insights": {"views": 100 * (i + 1), "likes": 5, "replies": 1,
+                             "reposts": 0, "quotes": 0, "shares": 0},
+            } for i in range(40)],
+            "user_insights": {"followers_count": 500, "30d_views": 1000},
+            "follower_demographics": {"country": {"KR": 100}},
+        }
+
+    def test_resolve_lang(self):
+        self.assertEqual(i18n.resolve_lang(None), "ko")
+        self.assertEqual(i18n.resolve_lang("EN"), "en")
+        with self.assertRaises(ValueError):
+            i18n.resolve_lang("fr")
+
+    def test_ko_is_noop(self):
+        with patch.object(export_excel, "load_snapshots", return_value=[]):
+            wb = export_excel.build_workbook(self._data())
+        before = list(wb.sheetnames)
+        i18n.translate_workbook(wb, "ko")
+        self.assertEqual(wb.sheetnames, before)
+
+    def test_translates_sheet_names_and_keeps_numbers(self):
+        for lang in ("en", "ja"):
+            with patch.object(export_excel, "load_snapshots", return_value=[]):
+                ko = export_excel.build_workbook(self._data())
+                other = export_excel.build_workbook(self._data())
+            i18n.translate_workbook(other, lang)
+
+            self.assertNotEqual(ko.sheetnames, other.sheetnames, lang)
+            # Excel 시트명 31자 제한을 넘기면 openpyxl이 조용히 잘라낸다.
+            for name in other.sheetnames:
+                self.assertLessEqual(len(name), i18n.EXCEL_SHEET_MAX, name)
+            self.assertEqual(len(set(other.sheetnames)), len(other.sheetnames))
+
+            numbers = 0
+            for a, b in zip(ko.worksheets, other.worksheets):
+                for ra, rb in zip(a.iter_rows(values_only=True),
+                                  b.iter_rows(values_only=True)):
+                    for x, y in zip(ra, rb):
+                        if isinstance(x, (int, float)):
+                            numbers += 1
+                            self.assertEqual(x, y, f"{lang}: 숫자가 바뀌었다")
+            self.assertGreater(numbers, 100, "숫자 셀이 너무 적어 검증이 무의미하다")
+
+    def test_post_body_is_never_translated_when_not_a_ui_string(self):
+        with patch.object(export_excel, "load_snapshots", return_value=[]):
+            wb = export_excel.build_workbook(self._data())
+        i18n.translate_workbook(wb, "en")
+        joined = "\n".join(
+            str(c) for ws in wb.worksheets
+            for row in ws.iter_rows(values_only=True) for c in row if c
+        )
+        self.assertIn("post body 1 한국어 본문", joined)

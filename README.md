@@ -8,6 +8,7 @@ Meta Threads API를 활용한 계정 종합 분석 도구. OAuth 인증부터 �
 - **전체 게시물 수집** — 페이지네이션으로 모든 게시물 + 인사이트 병렬 수집
 - **계정 인사이트** — 팔로워 수, 30일 조회수, 인구통계(국가/도시/성별/연령)
 - **Excel 리포트** (12개 시트) — 랭킹, 시간대 분석, 일별 시계열, 바이럴 분석, 성장 전략 등
+- **3개 언어 출력** — 한국어 / English / 日本語 (`--lang`)
 - **토큰 갱신** — 60일 장기 토큰 만료 전 갱신
 
 ## 사전 준비
@@ -128,6 +129,17 @@ python3 export_excel.py -i path/to.json -o path/to/report.xlsx
 
 기본: `output/` 최신 `analysis_*.json` → `output/threads_analysis_YYYYMMDD.xlsx`
 
+**리포트 언어 (한국어 / 영어 / 일본어):**
+
+```bash
+python3 export_excel.py --lang en      # English
+python3 export_excel.py --lang ja      # 日本語
+python3 export_excel.py                # 한국어 (기본)
+```
+
+`.env`에 `THREADS_LANG=en`을 넣어 고정할 수도 있습니다. `--lang`이 우선합니다.
+시트명·헤더·판정 라벨만 번역되고 **게시물 본문과 숫자는 원본 그대로** 유지됩니다.
+
 **생성되는 시트 (12개):**
 
 | 시트 | 내용 |
@@ -203,6 +215,7 @@ python3 -m unittest discover -s tests -v
 ```
 threads-analytics/
 ├── setup.py             # 설치 도우미 (의존성·인증서·.env·인증 일괄)
+├── i18n.py              # 리포트 출력 언어 (ko/en/ja)
 ├── auth.py              # OAuth 2.0 (HTTPS, state CSRF, TOKEN_EXPIRES_AT)
 ├── analyze.py           # 수집·분석 (재시도, TTL, CLI, 저장함)
 ├── archive.py           # 게시 텍스트 저장함
