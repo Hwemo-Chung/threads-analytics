@@ -252,6 +252,7 @@ threads-analytics/
 ├── tests/               # 단위 테스트 (네트워크 없음)
 ├── samples/             # 익명 샘플 데이터 (Meta 앱 없이 체험용)
 ├── docs/SAMPLE.md       # 시트 발췌 (샘플 워크북에서 자동 생성)
+├── tools/render_preview.py  # 워크북 → HTML 프리뷰 (스크린샷 대체)
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore

@@ -100,6 +100,17 @@ Verdicts are withheld below 30 posts in an hour. Note that a high *average* and 
 | Snapshot Growth | How are followers trending? |
 | Path to 100K | What do I do on Monday morning? |
 
+## Rendered preview
+
+`docs/preview.html` reproduces the same sheets **with the actual cell formatting** — header colour,
+highlight fills, bold. It is generated from the workbook, not screenshotted, so there is no image to
+go stale and no personal data to leak:
+
+```bash
+python3 export_excel.py -i samples/sample_analysis.json --lang en -o output/sample_report_en.xlsx
+python3 tools/render_preview.py
+```
+
 > This page is generated from the sample workbook, not written by hand.
 > `tests/test_core.py` builds all three languages from `samples/sample_analysis.json`,
 > so a broken sheet fails the suite before this page can go stale.
