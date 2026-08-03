@@ -26,6 +26,19 @@ On the author's own account (1,954 original posts, 4.4M lifetime views):
 - **Three output languages** — Korean / English / Japanese via `--lang`
 - **Token refresh** — extend the 60-day long-lived token before it expires
 
+## See it before you install anything
+
+You can build a real report without a Meta app. The sample dataset ships with the repo.
+
+```bash
+pip install -r requirements.txt
+python3 export_excel.py -i samples/sample_analysis.json -o sample.xlsx
+```
+
+Sheet excerpts live in **[docs/SAMPLE.md](./docs/SAMPLE.md)**.
+The sample is synthetic — post text and the username are fake; only the shape of the numbers
+comes from a real account.
+
 ## Requirements
 
 ### 1. A Meta developer app

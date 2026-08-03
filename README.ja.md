@@ -26,6 +26,18 @@ Meta Threads API で自分のアカウントの投稿を全件収集し、12シ�
 - **3言語出力** — 韓国語 / English / 日本語（`--lang`）
 - **トークン更新** — 60日の長期トークンを期限前に延長
 
+## まず目で見る
+
+Meta アプリなしで実際のレポートを作れます。サンプルデータを同梱しています。
+
+```bash
+pip install -r requirements.txt
+python3 export_excel.py -i samples/sample_analysis.json -o sample.xlsx
+```
+
+シートの抜粋は **[docs/SAMPLE.md](./docs/SAMPLE.md)** にあります。
+サンプルは合成データです。本文とアカウント名は架空で、数値の分布だけを実アカウントから取っています。
+
 ## 準備
 
 ### 1. Meta 開発者アプリ

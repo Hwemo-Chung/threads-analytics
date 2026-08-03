@@ -26,6 +26,18 @@ Meta Threads API로 계정의 전체 게시물을 수집해 12시트 엑셀 리�
 - **3개 언어 출력** — 한국어 / English / 日本語 (`--lang`)
 - **토큰 갱신** — 60일 장기 토큰 만료 전 갱신
 
+## 먼저 눈으로 보기
+
+Meta 앱 없이 실제 리포트를 만들어 볼 수 있습니다. 샘플 데이터가 들어 있습니다.
+
+```bash
+pip install -r requirements.txt
+python3 export_excel.py -i samples/sample_analysis.json -o sample.xlsx
+```
+
+시트 발췌는 **[docs/SAMPLE.md](./docs/SAMPLE.md)** 에 있습니다.
+샘플은 합성 데이터입니다 — 본문·계정명은 가짜이고 숫자의 분포만 실제 계정에서 가져왔습니다.
+
 ## 사전 준비
 
 ### 1. Meta Developer 앱 생성
@@ -238,6 +250,8 @@ threads-analytics/
 ├── export_excel.py      # JSON → Excel 12시트 (-i/-o)
 ├── refresh_token.py     # 장기 토큰 갱신
 ├── tests/               # 단위 테스트 (네트워크 없음)
+├── samples/             # 익명 샘플 데이터 (Meta 앱 없이 체험용)
+├── docs/SAMPLE.md       # 시트 발췌 (샘플 워크북에서 자동 생성)
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore

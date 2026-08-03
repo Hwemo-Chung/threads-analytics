@@ -366,3 +366,46 @@ class TestI18n(unittest.TestCase):
                 f"{lang}: 번역되지 않은 생성 문장 {len(leftover)}종 — "
                 f"{sorted(leftover)[:3]}",
             )
+
+
+class TestBundledSample(unittest.TestCase):
+    """샘플 데이터는 README와 docs/SAMPLE.md가 파는 물건이다. 깨지면 즉시 알아야 한다."""
+
+    SAMPLE = os.path.join(ROOT, "samples", "sample_analysis.json")
+
+    def test_sample_exists_and_is_anonymous(self):
+        self.assertTrue(os.path.exists(self.SAMPLE), "samples/sample_analysis.json 누락")
+        with open(self.SAMPLE, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["profile"]["username"], "sampleuser")
+        posts = data["posts"]
+        self.assertGreaterEqual(len(posts), 500, "시간대 판정(n>=30)이 나오려면 표본이 충분해야 한다")
+        for p in posts:
+            self.assertTrue(p["id"].startswith("sample-"), f"실제 id 유출: {p['id']}")
+            self.assertIn("sampleuser", p["permalink"], "실제 permalink 유출")
+
+    def test_sample_builds_all_languages(self):
+        with open(self.SAMPLE, encoding="utf-8") as f:
+            data = json.load(f)
+        for lang in ("ko", "en", "ja"):
+            with patch.object(export_excel, "load_snapshots", return_value=[]):
+                wb = export_excel.build_workbook(data)
+            i18n.translate_workbook(wb, lang)
+            self.assertEqual(len(wb.sheetnames), 11, lang)
+            for name in wb.sheetnames:
+                self.assertGreaterEqual(
+                    wb[name].max_row, 3, f"{lang}: 시트 '{name}'가 비었다"
+                )
+
+    def test_sample_still_triggers_verdicts(self):
+        """표본이 줄어 모든 시간대가 '표본부족'이 되면 샘플이 제품을 저평가한다."""
+        with open(self.SAMPLE, encoding="utf-8") as f:
+            data = json.load(f)
+        with patch.object(export_excel, "load_snapshots", return_value=[]):
+            wb = export_excel.build_workbook(data)
+        verdicts = {
+            r[7] for r in wb["시간대 분석"].iter_rows(min_row=3, max_row=26, values_only=True)
+            if r[7]
+        }
+        self.assertIn("🟢우수", verdicts)
+        self.assertIn("🔴회피", verdicts)
