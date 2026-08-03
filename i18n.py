@@ -236,6 +236,12 @@ UI = {
         "바이럴 잘 되는 요일": "Best weekdays for viral",
         "바이럴비율5%+": "Viral rate 5%+",
         "인게이지먼트율2%+": "Engagement rate 2%+",
+        "• 좋아요율 높은 주제 강화 — 좋아요율 TOP 게시물 패턴을 분석해 반복 (좋아요율 = 팬 충성도 지표)":
+            "• Double down on what fans like — study your top like-rate posts and repeat the pattern "
+            "(like rate is a loyalty signal, not a reach signal)",
+        "• 주말 활동 강화 — 토·일 게시량이 평일 대비 적음. 경쟁 콘텐츠가 줄어 도달 기회일 수 있음":
+            "• Try weekends — you post less on Sat/Sun than on weekdays, and less competing content "
+            "can mean more reach",
         "내용(50자)": "Text (50 chars)", "내용(60자)": "Text (60 chars)",
         "내용(80자)": "Text (80 chars)", "내용(100자)": "Text (100 chars)",
     },
@@ -449,14 +455,93 @@ UI = {
         "바이럴 잘 되는 요일": "バイラルしやすい曜日",
         "바이럴비율5%+": "バイラル率5%以上",
         "인게이지먼트율2%+": "エンゲージメント率2%以上",
+        "• 좋아요율 높은 주제 강화 — 좋아요율 TOP 게시물 패턴을 분석해 반복 (좋아요율 = 팬 충성도 지표)":
+            "• いいね率が高いテーマを伸ばす — いいね率 TOP の投稿のパターンを分析して繰り返す"
+            "（いいね率はリーチではなくファンの熱量の指標）",
+        "• 주말 활동 강화 — 토·일 게시량이 평일 대비 적음. 경쟁 콘텐츠가 줄어 도달 기회일 수 있음":
+            "• 週末を試す — 土日の投稿量が平日より少ない。競合する投稿が減る分、リーチの機会になりうる",
         "내용(50자)": "本文(50字)", "내용(60자)": "本文(60字)",
         "내용(80자)": "本文(80字)", "내용(100자)": "本文(100字)",
     },
 }
 
 # 임계값이 박혀 동적으로 조립되는 문자열. 정확 일치가 불가능하므로 정규식으로 처리한다.
+# 임계값·집계값이 박혀 동적으로 조립되는 문자열. 정확 일치가 불가능하므로 정규식으로 처리한다.
+# repl 자리에 함수도 쓸 수 있다 (re.sub 규약). 목록형 문자열은 함수로 항목마다 치환한다.
+
+_WD_EN = {"월": "Mon", "화": "Tue", "수": "Wed", "목": "Thu", "금": "Fri", "토": "Sat", "일": "Sun"}
+_WD_JA = {"월": "月", "화": "火", "수": "水", "목": "木", "금": "金", "토": "土", "일": "日"}
+
+
+def _wd_counts(mapping, unit):
+    """'수(5건), 금(5건)' -> 'Wed (5), Fri (5)'"""
+    def repl(m):
+        parts = []
+        for day, count in re.findall(r"([월화수목금토일])\((\d+)건\)", m.group(0)):
+            parts.append(f"{mapping[day]}{unit.format(n=count)}")
+        return ", ".join(parts)
+    return repl
+
+
+def _hour_counts(fmt):
+    """'14시(3건), 17시(3건)' -> '14:00 (3), 17:00 (3)'"""
+    def repl(m):
+        return ", ".join(
+            fmt.format(h=int(h), n=c)
+            for h, c in re.findall(r"(\d+)시\((\d+)건\)", m.group(0))
+        )
+    return repl
+
+
+def _hour_list(fmt, sep=", "):
+    """'14시, 08시, 13시' 또는 '09시,10시' -> 시각 목록"""
+    def repl(m):
+        return sep.join(fmt.format(h=int(h)) for h in re.findall(r"(\d+)시", m.group(1)))
+    return repl
+
+
+def _type_counts(unit):
+    """'TEXT_POST 1712건, IMAGE 215건' -> 'TEXT_POST 1712, IMAGE 215'"""
+    def repl(m):
+        return ", ".join(
+            f"{name} {unit.format(n=count)}"
+            for name, count in re.findall(r"([A-Z_]+) (\d+)건", m.group(0))
+        )
+    return repl
+
+
+_WD_RUN = r"[월화수목금토일]\(\d+건\)(?:, [월화수목금토일]\(\d+건\))*"
+_HR_RUN = r"\d+시\(\d+건\)(?:, \d+시\(\d+건\))*"
+_TY_RUN = r"[A-Z_]+ \d+건(?:, [A-Z_]+ \d+건)*"
+
+def _len_label(unit):
+    """'400-500자' -> '400-500 chars' / '400-500字'. '500자+' 형태도 처리한다."""
+    def conv(s):
+        s = re.sub(r"(\d+)-(\d+)자", lambda m: f"{m.group(1)}-{m.group(2)}{unit}", s)
+        return re.sub(r"(\d+)자\+", lambda m: f"{m.group(1)}{unit}+", s)
+    return conv
+
+
+def _length_tradeoff(template, unit):
+    """글자수 상충 해석 문장. 구간 라벨이 문장 안에 박혀 있어 따로 변환한다."""
+    label = _len_label(unit)
+    def repl(m):
+        return template.format(
+            a=label(m.group(1)), er_a=m.group(2), v_a=m.group(3),
+            b=label(m.group(4)), er_b=m.group(5), v_b=m.group(6), gap=m.group(7),
+        )
+    return repl
+
+
+_TRADEOFF_RE = re.compile(
+    r"^글이 길수록 인게이지먼트율은 올라가지만 조회수는 급감합니다 "
+    r"\((.+): ER ([\d.]+)% / 조회 (\d+), (.+): ER ([\d.]+)% / 조회 (\d+)\) "
+    r"— 조회 격차 ([\d.]+)배$"
+)
+
 PATTERNS = {
     "en": [
+        # --- 바이럴 임계값이 박힌 제목/라벨 ---
         (re.compile(r"^(\d+)\. 바이럴 게시물 목록 \((.+)\+ 조회\)$"),
          r"\1. Viral Posts (\2+ views)"),
         (re.compile(r"^(\d+)\. 바이럴 게시물 패턴 분석 \((.+)\+ 조회\)$"),
@@ -469,7 +554,76 @@ PATTERNS = {
         (re.compile(r"^@(\S+) 성장 인사이트 리포트$"), r"@\1 Growth Insights Report"),
         (re.compile(r"^총 팔로워: ([\d,]+)명$"), r"Total followers: \1"),
         (re.compile(r"^주 ([+-][\d,]+) 팔로워$"), r"\1 followers / week"),
+
+        # --- 목록형 (항목마다 치환) ---
+        (re.compile(r"^" + _WD_RUN + r"$"), _wd_counts(_WD_EN, " ({n})")),
+        (re.compile(r"^" + _HR_RUN + r"$"), _hour_counts("{h:02d}:00 ({n})")),
+
+        # --- 시각·수량 라벨 ---
+        (re.compile(r"^(\d{2})시$"), lambda m: f"{int(m.group(1)):02d}:00"),
+        (re.compile(r"^(\d+)개$"), r"\1"),
+        (re.compile(r"^(\d+)개 \(([\d.]+)%\)$"), r"\1 (\2%)"),
+        (re.compile(r"^(\d{2})시 집중$"), lambda m: f"Focus on {int(m.group(1)):02d}:00"),
+        (re.compile(r"^현재 ([\d.]+)%$"), r"Currently \1%"),
+        (re.compile(r"^((?:\d+시,?)+) 과밀$"), _hour_list("{h:02d}:00", ", ")),
+        (re.compile(r"^답글있는글 ([\d.]+)%$"), r"\1% of posts have replies"),
+        (re.compile(r"^캐러셀/텍스트 인게이지먼트 ([\d.]+)배$"),
+         r"Carousel vs text engagement \1x"),
+        (re.compile(r"^길이구간 좋아요율 최대/최소 ([\d.]+)배$"),
+         r"Like-rate spread across length buckets \1x"),
+        (re.compile(r"^최고 (\d{2})시 평균조회 ([\d.]+)배\(전체대비\)$"),
+         lambda m: f"Best hour {int(m.group(1)):02d}:00, {m.group(2)}x overall average"),
+
+        # --- 섹션 제목·주석 ---
+        (re.compile(r"^🎯 좋아요율 TOP (\d+) \(조회 (\d+)\+ 기준\)$"),
+         r"🎯 Top \1 by Like Rate (\2+ views)"),
+        (re.compile(r"^3\. 게시물 조회수 누적 곡선 \(id 조인, n<(\d+) 구간은 '-'\)$"),
+         r"3. View Accrual Curve (joined by id; '-' where n<\1)"),
+        (re.compile(r"^시간대별 성과 \(JST, 중앙값 기준 · 데드=(\d+)조회 미만 · 판정은 (\d+)건 이상\)$"),
+         r"Performance by hour (JST, medians; dead = under \1 views; verdict needs \2+ posts)"),
+        (re.compile(r"^분석일: (\S+) / 팔로워: ([\d,]+)명 / 게시물: (\d+)개 \(리포스트 제외\)$"),
+         r"Analyzed \1 / Followers \2 / Posts \3 (reposts excluded)"),
+        (re.compile(r"^분석일: (\S+) / 팔로워: - / 게시물: (\d+)개 \(리포스트 제외\)$"),
+         r"Analyzed \1 / Followers - / Posts \2 (reposts excluded)"),
+        (re.compile(r"^미디어타입 전체 포함: (" + _TY_RUN + r") / 데드율 = 조회 (\d+) 미만 비율$"),
+         lambda m: "All media types included: "
+                   + _type_counts("{n}")(re.match(_TY_RUN, m.group(1)))
+                   + f" / dead rate = share under {m.group(2)} views"),
+
+        # --- 해석 문장 ---
+        (_TRADEOFF_RE, _length_tradeoff(
+            "Longer posts raise engagement rate but collapse reach "
+            "({a}: ER {er_a}% / {v_a} views, {b}: ER {er_b}% / {v_b} views) — {gap}x reach gap",
+            " chars")),
+        (re.compile(r"^상위 1%\((\d+)개\)가 전체 조회의 ([\d.]+)%, 최다 1건만으로 ([\d.]+)%를 차지합니다\. "
+                    r"평균 ([\d,]+)은 중앙값 ([\d,]+)의 ([\d.]+)배이며, 1위 게시물을 빼면 평균이 ([\d,]+)로 내려갑니다\. "
+                    r"다른 시트의 '평균' 지표는 소수 이상치가 만든 값이므로 중앙값과 함께 해석하세요\.$"),
+         r"The top 1% (\1 posts) hold \2% of all views, and the single best post alone holds \3%. "
+         r"The mean of \4 is \6x the median of \5; drop the top post and the mean falls to \7. "
+         r"Treat every 'average' on the other sheets as an outlier artifact and read it next to the median."),
+
+        # --- 전략 불릿 ---
+        (re.compile(r"^• 캐러셀 활용 확대 — 평균 인게이지먼트 캐러셀 ([\d.]+) vs 텍스트 ([\d.]+) "
+                    r"\(([\d.]+)배\)\. 현재 (\d+)개 → 주 1-2회 목표$"),
+         r"• Post more carousels — avg engagement \1 for carousels vs \2 for text (\3x). "
+         r"You have \4; aim for 1-2 per week"),
+        (re.compile(r"^• 미디어 타입 실험 — 캐러셀 ([\d.]+) / 텍스트 ([\d.]+) 평균 인게이지먼트\. 상위 타입 비중 확대$"),
+         r"• Test media types — avg engagement \1 carousel / \2 text. Shift toward the stronger one"),
+        (re.compile(r"^• 골든타임 집중 — 평균 조회 상위 시간대\(JST\): ((?:\d+시(?:, )?)+)\. 핵심 콘텐츠를 이 시간대에 게시$"),
+         lambda m: "• Use your golden hours — highest average views (JST): "
+                   + ", ".join(f"{int(h):02d}:00" for h in re.findall(r"(\d+)시", m.group(1)))
+                   + ". Post your best work then"),
+        (re.compile(r"^• 바이럴 패턴 반복 — 상위 조회 바이럴 (\d+)개 중 최빈 타입 (\S+)\((\d+)건\)\. "
+                    r"해당 포맷·주제 패턴 재사용$"),
+         r"• Repeat what went viral — of your top \1 viral posts, \2 is the most common type (\3). "
+         r"Reuse that format and subject"),
+        (re.compile(r"^• 답글 유도 — 현재 인게이지먼트율 ([\d.]+)%\. 질문형 마무리로 답글 비중을 높이면 알고리즘 가중치에 유리$"),
+         r"• Invite replies — engagement rate is \1%. Ending on a question lifts reply share, "
+         r"which the ranking appears to weight"),
+        (re.compile(r"^• 팔로워 인구통계 활용 — 핵심층: 연령 (\S+), 성별 (\S+), 국가 (\S+)\. 이 타겟에 맞는 콘텐츠 톤 유지$"),
+         r"• Write for who actually follows you — core segment: age \1, gender \2, country \3"),
     ],
+
     "ja": [
         (re.compile(r"^(\d+)\. 바이럴 게시물 목록 \((.+)\+ 조회\)$"),
          r"\1. バイラル投稿一覧（表示\2以上）"),
@@ -483,6 +637,69 @@ PATTERNS = {
         (re.compile(r"^@(\S+) 성장 인사이트 리포트$"), r"@\1 成長インサイトレポート"),
         (re.compile(r"^총 팔로워: ([\d,]+)명$"), r"総フォロワー: \1"),
         (re.compile(r"^주 ([+-][\d,]+) 팔로워$"), r"週 \1 フォロワー"),
+
+        (re.compile(r"^" + _WD_RUN + r"$"), _wd_counts(_WD_JA, "（{n}件）")),
+        (re.compile(r"^" + _HR_RUN + r"$"), _hour_counts("{h}時（{n}件）")),
+
+        (re.compile(r"^(\d{2})시$"), lambda m: f"{int(m.group(1))}時"),
+        (re.compile(r"^(\d+)개$"), r"\1件"),
+        (re.compile(r"^(\d+)개 \(([\d.]+)%\)$"), r"\1件 (\2%)"),
+        (re.compile(r"^(\d{2})시 집중$"), lambda m: f"{int(m.group(1))}時に集中"),
+        (re.compile(r"^현재 ([\d.]+)%$"), r"現在 \1%"),
+        (re.compile(r"^((?:\d+시,?)+) 과밀$"), _hour_list("{h}時", "・")),
+        (re.compile(r"^답글있는글 ([\d.]+)%$"), r"返信のある投稿 \1%"),
+        (re.compile(r"^캐러셀/텍스트 인게이지먼트 ([\d.]+)배$"),
+         r"カルーセル/テキストのエンゲージメント \1倍"),
+        (re.compile(r"^길이구간 좋아요율 최대/최소 ([\d.]+)배$"),
+         r"文字数帯のいいね率 最大/最小 \1倍"),
+        (re.compile(r"^최고 (\d{2})시 평균조회 ([\d.]+)배\(전체대비\)$"),
+         lambda m: f"最高は{int(m.group(1))}時、平均表示が全体の{m.group(2)}倍"),
+
+        (re.compile(r"^🎯 좋아요율 TOP (\d+) \(조회 (\d+)\+ 기준\)$"),
+         r"🎯 いいね率 TOP \1（表示\2以上）"),
+        (re.compile(r"^3\. 게시물 조회수 누적 곡선 \(id 조인, n<(\d+) 구간은 '-'\)$"),
+         r"3. 表示回数の累積カーブ（id結合、n<\1 の区間は '-'）"),
+        (re.compile(r"^시간대별 성과 \(JST, 중앙값 기준 · 데드=(\d+)조회 미만 · 판정은 (\d+)건 이상\)$"),
+         r"時間帯別の成績（JST・中央値基準・デッドは表示\1未満・判定は\2件以上）"),
+        (re.compile(r"^분석일: (\S+) / 팔로워: ([\d,]+)명 / 게시물: (\d+)개 \(리포스트 제외\)$"),
+         r"分析日: \1 / フォロワー: \2 / 投稿: \3件（リポスト除く）"),
+        (re.compile(r"^분석일: (\S+) / 팔로워: - / 게시물: (\d+)개 \(리포스트 제외\)$"),
+         r"分析日: \1 / フォロワー: - / 投稿: \2件（リポスト除く）"),
+        (re.compile(r"^미디어타입 전체 포함: (" + _TY_RUN + r") / 데드율 = 조회 (\d+) 미만 비율$"),
+         lambda m: "全メディアタイプを含む: "
+                   + _type_counts("{n}件")(re.match(_TY_RUN, m.group(1)))
+                   + f" / デッド率 = 表示{m.group(2)}未満の割合"),
+
+        (_TRADEOFF_RE, _length_tradeoff(
+            "長い投稿ほどエンゲージメント率は上がるが表示回数は激減する"
+            "（{a}: ER {er_a}% / 表示 {v_a}、{b}: ER {er_b}% / 表示 {v_b}）— 表示の差 {gap}倍",
+            "字")),
+        (re.compile(r"^상위 1%\((\d+)개\)가 전체 조회의 ([\d.]+)%, 최다 1건만으로 ([\d.]+)%를 차지합니다\. "
+                    r"평균 ([\d,]+)은 중앙값 ([\d,]+)의 ([\d.]+)배이며, 1위 게시물을 빼면 평균이 ([\d,]+)로 내려갑니다\. "
+                    r"다른 시트의 '평균' 지표는 소수 이상치가 만든 값이므로 중앙값과 함께 해석하세요\.$"),
+         r"上位1%（\1件）が全表示の\2%を占め、最多の1件だけで\3%を占めます。"
+         r"平均\4は中央値\5の\6倍で、1位を除くと平均は\7まで下がります。"
+         r"他シートの「平均」は少数の外れ値が作った値なので、必ず中央値と併せて読んでください。"),
+
+        (re.compile(r"^• 캐러셀 활용 확대 — 평균 인게이지먼트 캐러셀 ([\d.]+) vs 텍스트 ([\d.]+) "
+                    r"\(([\d.]+)배\)\. 현재 (\d+)개 → 주 1-2회 목표$"),
+         r"• カルーセルを増やす — 平均エンゲージメントはカルーセル\1 対 テキスト\2（\3倍）。"
+         r"現在\4件、週1〜2回を目標に"),
+        (re.compile(r"^• 미디어 타입 실험 — 캐러셀 ([\d.]+) / 텍스트 ([\d.]+) 평균 인게이지먼트\. 상위 타입 비중 확대$"),
+         r"• メディアタイプを試す — 平均エンゲージメント カルーセル\1 / テキスト\2。強い方の比率を上げる"),
+        (re.compile(r"^• 골든타임 집중 — 평균 조회 상위 시간대\(JST\): ((?:\d+시(?:, )?)+)\. 핵심 콘텐츠를 이 시간대에 게시$"),
+         lambda m: "• ゴールデンタイムに寄せる — 平均表示が高い時間帯(JST): "
+                   + "、".join(f"{int(h)}時" for h in re.findall(r"(\d+)시", m.group(1)))
+                   + "。主力の投稿はこの時間に"),
+        (re.compile(r"^• 바이럴 패턴 반복 — 상위 조회 바이럴 (\d+)개 중 최빈 타입 (\S+)\((\d+)건\)\. "
+                    r"해당 포맷·주제 패턴 재사용$"),
+         r"• 当たった型を繰り返す — 上位バイラル\1件のうち最頻タイプは\2（\3件）。"
+         r"その形式とテーマを再利用する"),
+        (re.compile(r"^• 답글 유도 — 현재 인게이지먼트율 ([\d.]+)%\. 질문형 마무리로 답글 비중을 높이면 알고리즘 가중치에 유리$"),
+         r"• 返信を誘う — 現在のエンゲージメント率は\1%。質問で締めると返信比率が上がり、"
+         r"ランキング上も有利に働く"),
+        (re.compile(r"^• 팔로워 인구통계 활용 — 핵심층: 연령 (\S+), 성별 (\S+), 국가 (\S+)\. 이 타겟에 맞는 콘텐츠 톤 유지$"),
+         r"• 実際のフォロワーに向けて書く — 中核層: 年齢\1、性別\2、国\3"),
     ],
 }
 

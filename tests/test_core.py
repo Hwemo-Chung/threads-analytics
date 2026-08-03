@@ -332,3 +332,37 @@ class TestI18n(unittest.TestCase):
             for row in ws.iter_rows(values_only=True) for c in row if c
         )
         self.assertIn("post body 1 한국어 본문", joined)
+
+    def test_no_generated_korean_survives_translation(self):
+        """생성 문장의 포맷이 바뀌면 정규식이 빗나간다. 그때 여기서 깨져야 한다."""
+        import glob as _glob
+        import re as _re
+
+        newest = sorted(_glob.glob(os.path.join(ROOT, "output", "analysis_*.json")))
+        if not newest:
+            self.skipTest("output/analysis_*.json 없음 — 실데이터가 있어야 의미 있는 검사")
+        data = export_excel.load_data(newest[-1])
+
+        def norm(s):
+            return _re.sub(r"\s+", " ", s or "").strip()
+
+        bodies = [norm(p.get("text")) for p in data.get("posts", [])]
+        topics = {p.get("topic_tag") for p in data.get("posts", []) if p.get("topic_tag")}
+
+        def is_post_data(s):
+            n = norm(s)
+            return n in topics or any(b.startswith(n) for b in bodies if b)
+
+        for lang in ("en", "ja"):
+            wb = export_excel.build_workbook(data)
+            i18n.translate_workbook(wb, lang)
+            leftover = {
+                v for ws in wb.worksheets
+                for row in ws.iter_rows(values_only=True) for v in row
+                if isinstance(v, str) and _re.search("[가-힣]", v) and not is_post_data(v)
+            }
+            self.assertEqual(
+                leftover, set(),
+                f"{lang}: 번역되지 않은 생성 문장 {len(leftover)}종 — "
+                f"{sorted(leftover)[:3]}",
+            )

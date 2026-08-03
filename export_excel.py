@@ -1677,7 +1677,10 @@ def main(argv=None):
         print(f"언어: {lang}")
     data = load_data(input_path)
     wb = build_workbook(data)
-    i18n.translate_workbook(wb, lang)
+    if i18n.translate_workbook(wb, lang) is not None and lang != "ko":
+        # 열 너비는 시트를 만들 때 한국어 기준으로 계산됐다. 영문 헤더가 더 길어 잘리므로 다시 잰다.
+        for ws in wb.worksheets:
+            auto_width(ws)
     wb.save(output_path)
     print(f"Excel 저장 완료: {output_path}")
     print(f"시트: {wb.sheetnames}")
