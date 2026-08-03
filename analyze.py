@@ -618,7 +618,7 @@ def print_summary(profile: dict, posts: list, user_insights: dict):
     print(tabulate(rows, headers=["지표", "값"], tablefmt="simple_outline"))
 
 
-def save_raw_data(profile, posts, user_insights, demographics) -> str:
+def save_raw_data(profile, posts, user_insights, demographics, partial: bool = False) -> str:
     output_dir = os.path.join(os.path.dirname(__file__), "output")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -627,6 +627,9 @@ def save_raw_data(profile, posts, user_insights, demographics) -> str:
 
     export = {
         "analyzed_at": datetime.now(JST).isoformat(),
+        # --max-posts로 일부만 받은 스냅샷은 완전 수집본과 섞이면 안 된다. 종단 분석이
+        # 게시물 급감으로 오독하고, export_excel의 기본 입력으로도 잡히기 때문이다.
+        "partial": bool(partial),
         "profile": profile,
         "posts": posts,
         "user_insights": user_insights,
@@ -744,7 +747,13 @@ def main(argv=None):
     print_post_ranking(enriched_posts)
     print_content_analysis(enriched_posts)
     print_summary(profile, enriched_posts, user_insights)
-    json_path = save_raw_data(profile, enriched_posts, user_insights, demographics)
+    json_path = save_raw_data(
+        profile, enriched_posts, user_insights, demographics,
+        partial=args.max_posts is not None,
+    )
+    if args.max_posts is not None:
+        print(f"  [주의] --max-posts={args.max_posts} 부분 수집본입니다. "
+              "종단 분석과 export_excel 기본 입력에서 제외됩니다.")
 
     if not args.skip_archive:
         save_archive(profile, enriched_posts, user_insights, source_path=json_path)

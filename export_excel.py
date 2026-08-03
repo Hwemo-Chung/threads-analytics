@@ -1590,20 +1590,77 @@ def resolve_input_path(input_arg: str = None) -> str:
         print("[ERROR] output/ 디렉토리에 analysis_*.json 파일이 없습니다.")
         print("  먼저 analyze.py를 실행해주세요.")
         sys.exit(1)
-    return json_files[-1]
+
+    # --max-posts 샘플 실행이 조용히 기본 리포트가 되는 사고를 막는다.
+    loaded = []
+    for path in json_files:
+        try:
+            loaded.append((path, load_data(path)))
+        except (OSError, ValueError):
+            continue
+    if not loaded:
+        return json_files[-1]
+    marked = _mark_partials(loaded)
+    full = [path for path, _, partial in marked if not partial]
+    if full and full[-1] != json_files[-1]:
+        skipped = sum(1 for _, _, partial in marked if partial)
+        print(f"[알림] 부분 수집본 {skipped}개를 건너뛰고 완전 수집본을 사용합니다.")
+        print("  특정 파일을 쓰려면 -i 로 지정하세요.")
+    return full[-1] if full else json_files[-1]
+
+
+# 부분 수집본 판정 기준. "partial": true 표식이 없는 옛 파일도 걸러야 한다.
+# 전체 최대치와 비교하면 안 된다 — 계정이 성장하므로 과거 스냅샷은 당연히 적고,
+# 1,822건짜리 4월 스냅샷이 2,292건 대비 부분 수집본으로 오판된다.
+# 그 시점까지의 누적 최대치와 비교해야 "갑자기 급감했다"를 잡는다.
+PARTIAL_RATIO = 0.9
+
+
+def is_partial_snapshot(data, prior_max=0):
+    """--max-posts 로 만든 부분 수집본인가. prior_max는 이 스냅샷 이전까지의 최대 게시물 수."""
+    if data.get("partial"):
+        return True
+    posts = data.get("posts") or []
+    return bool(prior_max) and len(posts) < prior_max * PARTIAL_RATIO
+
+
+def _mark_partials(loaded):
+    """[(path, data)]를 시간순으로 훑어 부분 수집본을 골라낸다. [(path, data, partial)] 반환."""
+    def when(item):
+        dt = parse_ts((item[1] or {}).get("analyzed_at"))
+        return (dt is None, dt, item[0])
+
+    out = []
+    prior_max = 0
+    for path, data in sorted(loaded, key=when):
+        partial = is_partial_snapshot(data, prior_max)
+        if not partial:
+            prior_max = max(prior_max, len(data.get("posts") or []))
+        out.append((path, data, partial))
+    return out
 
 
 def load_snapshots():
-    """output/analysis_*.json 전체를 오래된 순으로 로드 (cross-snapshot 추이 전용)."""
+    """output/analysis_*.json 전체를 오래된 순으로 로드 (cross-snapshot 추이 전용).
+
+    부분 수집본은 제외한다. 섞이면 게시물이 2,292 -> 40 으로 떨어진 것처럼 보여
+    구간 성장률이 -1,918 같은 가짜 폭락을 낸다.
+    """
     import glob as _glob
 
     output_dir = os.path.join(os.path.dirname(__file__), "output")
-    snapshots = []
-    for path in sorted(_glob.glob(os.path.join(output_dir, "analysis_*.json"))):
+    paths = sorted(_glob.glob(os.path.join(output_dir, "analysis_*.json")))
+
+    loaded = []
+    for path in paths:
         try:
-            data = load_data(path)
+            loaded.append((path, load_data(path)))
         except (OSError, ValueError):
             continue  # 수집 중이거나 깨진 파일은 건너뜀
+    snapshots = []
+    for path, data, partial in _mark_partials(loaded):
+        if partial:
+            continue
         posts = data.get("posts") or []
         user_insights = data.get("user_insights") or {}
         dt = parse_ts(data.get("analyzed_at"))

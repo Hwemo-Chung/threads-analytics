@@ -195,7 +195,13 @@ UI = {
         "100-150자": "100-150 chars", "150-200자": "150-200 chars",
         "200-300자": "200-300 chars", "300-400자": "300-400 chars",
         "400-500자": "400-500 chars", "500자+": "500+ chars",
-        "~50자 데드존": "0-50 chars dead zone",
+        "타입 비교 데이터 부족": "Not enough data to compare media types",
+        "데이터 없음 (일별 시계열 미수집)": "No data (daily series not collected)",
+        "데이터 없음 (topic_tag 미수집 — analyze.py 재실행 필요)":
+            "No data (topic_tag not collected — re-run analyze.py)",
+        "데이터 없음": "No data",
+        "해당 없음": "N/A",
+        "🟡 근접": "🟡 Close",
 
         # --- 경과일 / 분위 / 기간 ---
         "0-7일": "0-7 days", "7-14일": "7-14 days", "14-30일": "14-30 days",
@@ -414,7 +420,13 @@ UI = {
         "100-150자": "100-150字", "150-200자": "150-200字",
         "200-300자": "200-300字", "300-400자": "300-400字",
         "400-500자": "400-500字", "500자+": "500字以上",
-        "~50자 데드존": "50字未満のデッドゾーン",
+        "타입 비교 데이터 부족": "メディアタイプを比較するにはデータが足りない",
+        "데이터 없음 (일별 시계열 미수집)": "データなし（日次時系列は未取得）",
+        "데이터 없음 (topic_tag 미수집 — analyze.py 재실행 필요)":
+            "データなし（topic_tag 未取得 — analyze.py を再実行してください）",
+        "데이터 없음": "データなし",
+        "해당 없음": "該当なし",
+        "🟡 근접": "🟡 目前",
 
         # --- 경과일 / 분위 / 기간 ---
         "0-7일": "0-7日", "7-14일": "7-14日", "14-30일": "14-30日",
@@ -553,6 +565,7 @@ PATTERNS = {
         (re.compile(r"^(\d{4})-(\d{2}) \(부분\)$"), r"\1-\2 (partial)"),
         (re.compile(r"^@(\S+) 성장 인사이트 리포트$"), r"@\1 Growth Insights Report"),
         (re.compile(r"^총 팔로워: ([\d,]+)명$"), r"Total followers: \1"),
+        (re.compile(r"^총 팔로워: -$"), "Total followers: -"),
         (re.compile(r"^주 ([+-][\d,]+) 팔로워$"), r"\1 followers / week"),
 
         # --- 목록형 (항목마다 치환) ---
@@ -567,6 +580,13 @@ PATTERNS = {
         (re.compile(r"^현재 ([\d.]+)%$"), r"Currently \1%"),
         (re.compile(r"^((?:\d+시,?)+) 과밀$"), _hour_list("{h:02d}:00", ", ")),
         (re.compile(r"^답글있는글 ([\d.]+)%$"), r"\1% of posts have replies"),
+        (re.compile(r"^~?(\d+)(?:-(\d+))?자\+? 데드존$"),
+         lambda m: (f"{m.group(1)}-{m.group(2)} chars" if m.group(2) else f"0-{m.group(1)} chars")
+                   + " dead zone"),
+        (re.compile(r"^• 게시 요일 분산 — 현재 최빈 요일 ([월화수목금토일])\. "
+                    r"성과 상위 요일에 핵심 콘텐츠 배치$"),
+         lambda m: f"• Spread out your weekdays — you post most on {_WD_EN[m.group(1)]}. "
+                   "Move your best work to the days that actually perform"),
         (re.compile(r"^캐러셀/텍스트 인게이지먼트 ([\d.]+)배$"),
          r"Carousel vs text engagement \1x"),
         (re.compile(r"^길이구간 좋아요율 최대/최소 ([\d.]+)배$"),
@@ -636,6 +656,7 @@ PATTERNS = {
         (re.compile(r"^(\d{4})-(\d{2}) \(부분\)$"), r"\1-\2（一部）"),
         (re.compile(r"^@(\S+) 성장 인사이트 리포트$"), r"@\1 成長インサイトレポート"),
         (re.compile(r"^총 팔로워: ([\d,]+)명$"), r"総フォロワー: \1"),
+        (re.compile(r"^총 팔로워: -$"), "総フォロワー: -"),
         (re.compile(r"^주 ([+-][\d,]+) 팔로워$"), r"週 \1 フォロワー"),
 
         (re.compile(r"^" + _WD_RUN + r"$"), _wd_counts(_WD_JA, "（{n}件）")),
@@ -648,6 +669,13 @@ PATTERNS = {
         (re.compile(r"^현재 ([\d.]+)%$"), r"現在 \1%"),
         (re.compile(r"^((?:\d+시,?)+) 과밀$"), _hour_list("{h}時", "・")),
         (re.compile(r"^답글있는글 ([\d.]+)%$"), r"返信のある投稿 \1%"),
+        (re.compile(r"^~?(\d+)(?:-(\d+))?자\+? 데드존$"),
+         lambda m: (f"{m.group(1)}-{m.group(2)}字" if m.group(2) else f"{m.group(1)}字未満")
+                   + "のデッドゾーン"),
+        (re.compile(r"^• 게시 요일 분산 — 현재 최빈 요일 ([월화수목금토일])\. "
+                    r"성과 상위 요일에 핵심 콘텐츠 배치$"),
+         lambda m: f"• 曜日を分散する — 現在は{_WD_JA[m.group(1)]}曜に偏っている。"
+                   "成績の良い曜日に主力を回す"),
         (re.compile(r"^캐러셀/텍스트 인게이지먼트 ([\d.]+)배$"),
          r"カルーセル/テキストのエンゲージメント \1倍"),
         (re.compile(r"^길이구간 좋아요율 최대/최소 ([\d.]+)배$"),

@@ -335,37 +335,44 @@ class TestI18n(unittest.TestCase):
 
     def test_no_generated_korean_survives_translation(self):
         """생성 문장의 포맷이 바뀌면 정규식이 빗나간다. 그때 여기서 깨져야 한다."""
-        import glob as _glob
         import re as _re
 
-        newest = sorted(_glob.glob(os.path.join(ROOT, "output", "analysis_*.json")))
-        if not newest:
-            self.skipTest("output/analysis_*.json 없음 — 실데이터가 있어야 의미 있는 검사")
-        data = export_excel.load_data(newest[-1])
+        # 사용자의 output/ 을 읽으면 결과가 그날 데이터에 좌우된다. 동봉 샘플로 고정한다.
+        full = export_excel.load_data(
+            os.path.join(ROOT, "samples", "sample_analysis.json")
+        )
+        # 샘플만으로는 결손 분기('데이터 없음', '해당 없음' 등)를 못 밟는다.
+        # 신규 사용자가 처음 보는 화면이 이쪽이므로 같이 검사한다.
+        degraded = json.loads(json.dumps(full))
+        degraded["user_insights"] = {}
+        for post in degraded["posts"]:
+            post.pop("topic_tag", None)
+        for data in (full, degraded):
 
-        def norm(s):
-            return _re.sub(r"\s+", " ", s or "").strip()
+            def norm(s):
+                return _re.sub(r"\s+", " ", s or "").strip()
 
-        bodies = [norm(p.get("text")) for p in data.get("posts", [])]
-        topics = {p.get("topic_tag") for p in data.get("posts", []) if p.get("topic_tag")}
+            bodies = [norm(p.get("text")) for p in data.get("posts", [])]
+            topics = {p.get("topic_tag") for p in data.get("posts", []) if p.get("topic_tag")}
 
-        def is_post_data(s):
-            n = norm(s)
-            return n in topics or any(b.startswith(n) for b in bodies if b)
+            def is_post_data(s, bodies=bodies, topics=topics):
+                n = norm(s)
+                return n in topics or any(b.startswith(n) for b in bodies if b)
 
-        for lang in ("en", "ja"):
-            wb = export_excel.build_workbook(data)
-            i18n.translate_workbook(wb, lang)
-            leftover = {
-                v for ws in wb.worksheets
-                for row in ws.iter_rows(values_only=True) for v in row
-                if isinstance(v, str) and _re.search("[가-힣]", v) and not is_post_data(v)
-            }
-            self.assertEqual(
-                leftover, set(),
-                f"{lang}: 번역되지 않은 생성 문장 {len(leftover)}종 — "
-                f"{sorted(leftover)[:3]}",
-            )
+            for lang in ("en", "ja"):
+                with patch.object(export_excel, "load_snapshots", return_value=[]):
+                    wb = export_excel.build_workbook(data)
+                i18n.translate_workbook(wb, lang)
+                leftover = {
+                    v for ws in wb.worksheets
+                    for row in ws.iter_rows(values_only=True) for v in row
+                    if isinstance(v, str) and _re.search("[가-힣]", v) and not is_post_data(v)
+                }
+                self.assertEqual(
+                    leftover, set(),
+                    f"{lang}: 번역되지 않은 생성 문장 {len(leftover)}종 — "
+                    f"{sorted(leftover)[:3]}",
+                )
 
 
 class TestBundledSample(unittest.TestCase):
@@ -409,3 +416,50 @@ class TestBundledSample(unittest.TestCase):
         }
         self.assertIn("🟢우수", verdicts)
         self.assertIn("🔴회피", verdicts)
+
+
+class TestPartialSnapshot(unittest.TestCase):
+    """--max-posts 부분 수집본이 완전 수집본과 섞이면 종단 분석이 가짜 폭락을 낸다."""
+
+    def _snap(self, n_posts, when, partial=None):
+        data = {
+            "analyzed_at": when,
+            "posts": [{"id": str(i), "media_type": "TEXT_POST", "text": "x",
+                       "timestamp": "2026-01-15T10:00:00+0000",
+                       "insights": {"views": 10}} for i in range(n_posts)],
+            "user_insights": {"followers_count": 100},
+        }
+        if partial is not None:
+            data["partial"] = partial
+        return data
+
+    def test_explicit_flag_wins(self):
+        self.assertTrue(export_excel.is_partial_snapshot(
+            self._snap(2000, "2026-08-03T15:00:00+09:00", partial=True), 0))
+
+    def test_growth_is_not_mistaken_for_partial(self):
+        """계정이 커지는 중이면 과거 스냅샷은 당연히 작다. 이걸 부분 수집본으로 보면 안 된다."""
+        loaded = [
+            ("a.json", self._snap(1822, "2026-04-27T14:28:00+09:00")),
+            ("b.json", self._snap(2035, "2026-06-14T19:15:00+09:00")),
+            ("c.json", self._snap(2292, "2026-08-02T23:51:00+09:00")),
+        ]
+        marked = export_excel._mark_partials(loaded)
+        self.assertEqual([p for _, _, p in marked], [False, False, False])
+
+    def test_sudden_drop_is_partial(self):
+        loaded = [
+            ("a.json", self._snap(2292, "2026-08-02T23:51:00+09:00")),
+            ("b.json", self._snap(40, "2026-08-03T15:02:00+09:00")),
+            ("c.json", self._snap(60, "2026-08-03T15:03:00+09:00")),
+        ]
+        marked = export_excel._mark_partials(loaded)
+        self.assertEqual([p for _, _, p in marked], [False, True, True])
+
+    def test_partial_never_reaches_longitudinal_sheet(self):
+        full = self._snap(2292, "2026-08-02T23:51:00+09:00")
+        part = self._snap(40, "2026-08-03T15:02:00+09:00", partial=True)
+        kept = [d for _, d, p in export_excel._mark_partials(
+            [("f.json", full), ("p.json", part)]) if not p]
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(len(kept[0]["posts"]), 2292)
