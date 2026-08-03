@@ -123,7 +123,8 @@ python3 export_excel.py                # Korean (default)
 
 You can pin it with `THREADS_LANG=en` in `.env`; `--lang` wins.
 
-Sheet names, headers and verdict labels are translated. **Post text and every number stay exactly as collected.** Some generated commentary in the strategy sheets is still Korean — see [Known gaps](#known-gaps).
+Sheet names, headers, verdict labels **and the generated strategy commentary** are all translated.
+**Post text and every number stay exactly as collected.**
 
 ### The 12 sheets
 
@@ -175,8 +176,7 @@ No network, no secrets.
 
 ## Known gaps
 
-- Generated commentary in **Growth Insights** and **Path to 100K** is composed at runtime and is still emitted in Korean under `--lang en|ja`. Sheet structure, headers and labels are translated.
-- Column widths are computed before translation, so a few English headers render narrower than their text.
+- Long cells hit the 60-character column-width cap and appear clipped. Click the cell to see the full value.
 - Follower demographics require **100+ followers** — a Meta restriction, not a bug.
 - Hour-of-day and length analyses withhold a verdict below 30 samples rather than guessing.
 
